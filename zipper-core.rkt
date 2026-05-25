@@ -1,6 +1,7 @@
 #lang racket
 
-(require racket/match)
+(require racket/match
+         racket/string)
 
 (provide
  (struct-out summary-algebra)
@@ -20,8 +21,11 @@
  string->rope
  start
  gap-summary
+ gap-sides
  zipper-split
  zipper->rope
+ zipper->cursor-string
+ zipper->debug-string
  insert-left
  insert-right
  open-left
@@ -44,7 +48,11 @@
 ;; A zipper is the cursor and the main interface to the text. The rope stores
 ;; persistent content; the zipper carries the current gap, its summary context,
 ;; and the path needed to move, inspect, and edit around that gap.
-(struct zipper (sys left right before-summary after-summary crumbs) #:transparent)
+(struct zipper (sys left right before-summary after-summary crumbs)
+  #:transparent
+  #:property prop:custom-write
+  (lambda (z out _mode)
+    (display (zipper->debug-string z) out)))
 
 ;; A gap crumb is a parent context with the current gap as its hole.
 ;; Applying one to a child gap rebuilds the same gap at the parent level.
@@ -238,11 +246,13 @@
     [_
      (raise-argument-error 'zipper-system "zipper?" z)]))
 
-(define ((gap-choice sys guide [select identity]) before left right after)
-  (unless (procedure? guide)
-    (raise-argument-error 'gap-choice "procedure?" guide))
-  (guide (select (summary+ sys before left))
-         (select (summary+ sys right after))))
+(define ((gap->sides sys k) before left right after)
+  (k (summary+ sys before left)
+     (summary+ sys right after)))
+
+(define (gap-sides z k)
+  (gap-summary z
+               (gap->sides (zipper-system z) k)))
 
 (define (guide-choice guide select left-total right-total)
   (case (guide (select left-total) (select right-total))
@@ -253,10 +263,11 @@
      (error 'guide "must return -1, 0, or 1")]))
 
 (define ((guide-search sys guide [select identity]) before left right after)
-  (guide-choice guide
-                select
-                (summary+ sys before left)
-                (summary+ sys right after)))
+  ((gap->sides
+    sys
+    (lambda (left-total right-total)
+      (guide-choice guide select left-total right-total)))
+   before left right after))
 
 (define ((guide-navigate sys guide [select identity]) before left right after)
   (define left-total (summary+ sys before left))
@@ -354,10 +365,11 @@
            (zipper sys child-left child-right child-before after (cons crumb crumbs))))]))
 
 (define ((arrived? guide [select identity]) z)
-  (define sys (zipper-system z))
   (unless (procedure? guide)
     (raise-argument-error 'arrived? "procedure?" guide))
-  (zero? (gap-summary z (gap-choice sys guide select))))
+  (zero? (gap-sides z
+                    (lambda (left-total right-total)
+                      (guide-choice guide select left-total right-total)))))
 
 (define (choose guide z [select identity])
   ((search-step guide select) z identity identity identity))
@@ -427,6 +439,39 @@
     (zipper-split z
                   (lambda (left right)
                     ((concat-rope sys) left right)))))
+
+(define (zipper->cursor-string z [marker "|"])
+  (zipper-split z
+                (lambda (left right)
+                  (string-append (rope->string left)
+                                 marker
+                                 (rope->string right)))))
+
+(define (zipper->debug-string z)
+  (define (text-gap label left right)
+    (string-join
+     (list (format "~a-left:  ~v ^" label left)
+           (format "~a-right: ~v" label right))
+     "\n"))
+  (define cursor
+    (zipper-split z
+                  (lambda (left right)
+                    (text-gap "cursor"
+                              (rope->string left)
+                              (rope->string right)))))
+  (define (totals-gap left right)
+    (string-join
+     (list (format "left-total-summary:  ~v ^" left)
+           (format "right-total-summary: ~v" right))
+     "\n"))
+  (define totals
+    (gap-sides z
+               (lambda (left right)
+                 (totals-gap left right))))
+  (string-join
+   (list cursor
+         totals)
+   "\n"))
 
 (define/contract (insert-left z inserted)
   (-> zipper? rope? zipper?)
@@ -606,6 +651,16 @@
     (define edited (insert-right z inserted))
     (check-split edited "ab" "XYcd")
     (check-equal? (rope->string (zipper->rope edited)) "abXYcd"))
+
+  (test-case "zipper cursor strings show the cursor and local gap"
+    (define z ((navigate (position-guide 2)) ((start test-sys) (test-rope "abcd"))))
+    (check-equal? (zipper->cursor-string z "^") "ab^cd")
+    (check-true (string-contains? (zipper->debug-string z)
+                                  "cursor-left:  \"ab\""))
+    (check-true (string-contains? (zipper->debug-string z)
+                                  "cursor-right: \"cd\""))
+    (check-false (string-contains? (zipper->debug-string z)
+                                   "local-left")))
 
   (test-case "search descends through the right piece"
     (define z ((start test-sys) (test-rope "abc")))
