@@ -22,10 +22,15 @@
  gap-summary
  zipper-split
  zipper->rope
+ insert-left
+ insert-right
  open-left
  open-right
+ shift-left
+ shift-right
  up
  root
+ navigate
  choose
  search
  split-rope)
@@ -49,7 +54,7 @@
   (lambda (self sys left right)
     (match-define (opened-left before sibling after) self)
     (values left
-            (((concat-rope sys) right) sibling)
+            ((concat-rope sys) right sibling)
             before
             after)))
 
@@ -58,7 +63,7 @@
   #:property prop:procedure
   (lambda (self sys left right)
     (match-define (opened-right before sibling after) self)
-    (values (((concat-rope sys) sibling) left)
+    (values ((concat-rope sys) sibling left)
             right
             before
             after)))
@@ -115,9 +120,11 @@
   (leaf text ((summary-algebra-leaf sys) text)))
 
 (define (make-leaf-range sys text start end)
-  (leaf-range text start end
-              ((summary-algebra-leaf sys)
-               (substring text start end))))
+  (if (= start end)
+      (empty-rope sys)
+      (leaf-range text start end
+                  ((summary-algebra-leaf sys)
+                   (substring text start end)))))
 
 (define (piece-text piece)
   (match piece
@@ -145,8 +152,7 @@
                                             (leaf-range-text left)
                                             (leaf-range-start left)
                                             (leaf-range-end right)))
-      (((concat-rope sys) (piece->rope sys left))
-       (piece->rope sys right))))
+      ((concat-rope sys) (piece->rope sys left) (piece->rope sys right))))
 
 (define (normalize-piece sys piece)
   ((leaf-rope sys) (piece-text piece)))
@@ -158,16 +164,16 @@
   (and (leaf? rope)
        (string=? "" (leaf-text rope))))
 
-(define (((branch-rope sys) left) right)
+(define ((branch-rope sys) left right)
   (unless (and (rope? left) (rope? right))
     (raise-argument-error 'branch-rope "two ropes" (list left right)))
   (branch left right (summary+ sys (rope-summary left) (rope-summary right))))
 
-(define (((concat-rope sys) left) right)
+(define ((concat-rope sys) left right)
   (cond
     [(empty-rope? left) right]
     [(empty-rope? right) left]
-    [else (((branch-rope sys) left) right)]))
+    [else ((branch-rope sys) left right)]))
 
 (define (rope-chunks rope)
   (match rope
@@ -190,7 +196,6 @@
                (min (string-length text) (+ start chunk-size)))))
 
 (define ((build-balanced sys) ropes)
-  (define join (concat-rope sys))
   (define parts (list->vector ropes))
   (define (build start end)
     (define count (- end start))
@@ -199,8 +204,7 @@
       [(= count 1) (vector-ref parts start)]
       [else
        (define middle (+ start (quotient count 2)))
-       ((join (build start middle))
-        (build middle end))]))
+       ((concat-rope sys) (build start middle) (build middle end))]))
   (build 0 (vector-length parts)))
 
 (define ((string->rope sys) text #:chunk-size [chunk-size 1024])
@@ -235,8 +239,53 @@
      (raise-argument-error 'zipper-system "zipper?" z)]))
 
 (define ((gap-choice sys guide [select identity]) before left right after)
+  (unless (procedure? guide)
+    (raise-argument-error 'gap-choice "procedure?" guide))
   (guide (select (summary+ sys before left))
          (select (summary+ sys right after))))
+
+(define (guide-choice guide select left-total right-total)
+  (case (guide (select left-total) (select right-total))
+    [(-1) -1]
+    [(0) 0]
+    [(1) 1]
+    [else
+     (error 'guide "must return -1, 0, or 1")]))
+
+(define ((guide-search sys guide [select identity]) before left right after)
+  (guide-choice guide
+                select
+                (summary+ sys before left)
+                (summary+ sys right after)))
+
+(define ((guide-navigate sys guide [select identity]) before left right after)
+  (define left-total (summary+ sys before left))
+  (define right-total (summary+ sys right after))
+  (case (guide-choice guide select left-total right-total)
+    [(0) 0]
+    [(-1)
+     (case (guide-choice guide
+                         select
+                         before
+                         (summary+ sys left right-total))
+       [(1) -1]
+       [(-1 0) -2])]
+    [(1)
+     (case (guide-choice guide
+                         select
+                         (summary+ sys left-total right)
+                         after)
+       [(-1) 1]
+       [(0 1) 2])]))
+
+(define ((search-step guide [select identity]) z left-k stay-k right-k)
+  (define sys (zipper-system z))
+  (unless (procedure? guide)
+    (raise-argument-error 'search-step "procedure?" guide))
+  (case (gap-summary z (guide-search sys guide select))
+    [(-1) (left-k (open-left z))]
+    [(0) (stay-k z)]
+    [(1) (right-k (open-right z))]))
 
 (define (leaf-piece-bounds piece)
   (match piece
@@ -253,8 +302,6 @@
   (define-values (text start end) (leaf-piece-bounds piece))
   (define len (- end start))
   (cond
-    [(zero? len)
-     (error who "cannot open an empty leaf")]
     [(= len 1)
      (error who "cannot open atomic leaf: ~v" (substring text start end))]
     [else
@@ -272,21 +319,17 @@
      (define crumb (opened-left before right after))
      (zipper sys child-left child-right before child-after (cons crumb crumbs))]
     [(or (leaf _ _) (leaf-range _ _ _ _))
-     (case (leaf-piece-length left)
-       [(0)
-        (error 'open-left "cannot open before the start of the rope")]
-       [(1)
-        (zipper sys
-                (empty-rope sys)
-                (leaf-join sys left right)
-                before
-                after
-                crumbs)]
-       [else
-        (define crumb (opened-leaf-left before right after))
-        (define-values (child-left child-right)
-          (split-leaf-piece sys 'open-left left))
-        (zipper sys child-left child-right before child-after (cons crumb crumbs))])]))
+     (if (= (leaf-piece-length left) 1)
+         (zipper sys
+                 (empty-rope sys)
+                 (leaf-join sys left right)
+                 before
+                 after
+                 crumbs)
+         (let-values ([(child-left child-right)
+                       (split-leaf-piece sys 'open-left left)])
+           (define crumb (opened-leaf-left before right after))
+           (zipper sys child-left child-right before child-after (cons crumb crumbs))))]))
 
 (define (open-right z)
   (match-define (zipper sys left right before after crumbs) z)
@@ -298,21 +341,17 @@
      (define crumb (opened-right before left after))
      (zipper sys child-left child-right child-before after (cons crumb crumbs))]
     [(or (leaf _ _) (leaf-range _ _ _ _))
-     (case (leaf-piece-length right)
-       [(0)
-        (error 'open-right "cannot open past the end of the rope")]
-       [(1)
-        (zipper sys
-                (leaf-join sys left right)
-                (empty-rope sys)
-                before
-                after
-                crumbs)]
-       [else
-        (define crumb (opened-leaf-right before left after))
-        (define-values (child-left child-right)
-          (split-leaf-piece sys 'open-right right))
-        (zipper sys child-left child-right child-before after (cons crumb crumbs))])]))
+     (if (= (leaf-piece-length right) 1)
+         (zipper sys
+                 (leaf-join sys left right)
+                 (empty-rope sys)
+                 before
+                 after
+                 crumbs)
+         (let-values ([(child-left child-right)
+                       (split-leaf-piece sys 'open-right right)])
+           (define crumb (opened-leaf-right before left after))
+           (zipper sys child-left child-right child-before after (cons crumb crumbs))))]))
 
 (define ((arrived? guide [select identity]) z)
   (define sys (zipper-system z))
@@ -320,27 +359,48 @@
     (raise-argument-error 'arrived? "procedure?" guide))
   (zero? (gap-summary z (gap-choice sys guide select))))
 
-(define ((choose guide [select identity]) z)
-  (define sys (zipper-system z))
-  (unless (procedure? guide)
-    (raise-argument-error 'choose "procedure?" guide))
-  (case (gap-summary z (gap-choice sys guide select))
-    [(-1) (open-left z)]
-    [(0) z]
-    [(1) (open-right z)]
-    [else
-     (error 'choose "guide must return -1, 0, or 1")]))
+(define (choose guide z [select identity])
+  ((search-step guide select) z identity identity identity))
 
 (define ((search guide [select identity]) z)
-  (let ([step (choose guide select)]
-        [done? (arrived? guide select)])
-    (call/ec
-     (lambda (k)
-       (for/fold ([current z])
-                 ([_ (in-naturals)])
-         (if (done? current)
-             (k current)
-             (step current)))))))
+  (let loop ([current z])
+    ((search-step guide select) current loop identity loop)))
+
+(define ((navigate guide [select identity]) z)
+  ((navigation-step guide select)
+   z
+   (navigate guide select)
+   (search guide select)
+   identity
+   (search guide select)
+   (navigate guide select)))
+
+(define ((navigation-step guide [select identity])
+         z
+         before-k left-k stay-k right-k after-k)
+  (define sys (zipper-system z))
+  (unless (procedure? guide)
+    (raise-argument-error 'navigation-step "procedure?" guide))
+  (case (gap-summary z (guide-navigate sys guide select))
+    [(-2) (before-k (shift-left z))]
+    [(-1) (left-k (open-left z))]
+    [(0) (stay-k z)]
+    [(1) (right-k (open-right z))]
+    [(2) (after-k (shift-right z))]))
+
+(define (left-context-crumb? crumb)
+  (or (opened-right? crumb)
+      (opened-leaf-right? crumb)))
+
+(define (right-context-crumb? crumb)
+  (or (opened-left? crumb)
+      (opened-leaf-left? crumb)))
+
+(define (gap->rope sys crumb left right)
+  (if (or (opened-leaf-left? crumb)
+          (opened-leaf-right? crumb))
+      (leaf-join sys left right)
+      ((concat-rope sys) (piece->rope sys left) (piece->rope sys right))))
 
 (define (up z)
   (match-define (zipper sys left right _before _after crumbs) z)
@@ -366,9 +426,199 @@
   (let ([sys (zipper-system z)])
     (zipper-split z
                   (lambda (left right)
-                    (((concat-rope sys) left) right)))))
+                    ((concat-rope sys) left right)))))
+
+(define/contract (insert-left z inserted)
+  (-> zipper? rope? zipper?)
+  (match-let ([(zipper sys left _ _ _ _) z])
+    (struct-copy zipper z
+                 [left ((concat-rope sys) left inserted)])))
+
+(define/contract (insert-right z inserted)
+  (-> zipper? rope? zipper?)
+  (match-let ([(zipper sys _ right _ _ _) z])
+    (struct-copy zipper z
+                 [right ((concat-rope sys) inserted right)])))
+
+(define (shift-left z)
+  (let loop ([current z])
+    (match-define (zipper sys left right _before _after crumbs) current)
+    (match crumbs
+      ['()
+       ((start (zipper-system current)) (zipper->rope current))]
+      [(cons crumb _rest)
+       (if (left-context-crumb? crumb)
+           (match crumb
+             [(opened-right before sibling after)
+              (zipper sys sibling (gap->rope sys crumb left right) before after _rest)]
+             [(opened-leaf-right before sibling after)
+              (zipper sys sibling (gap->rope sys crumb left right) before after _rest)])
+           (loop (up current)))])))
+
+(define (shift-right z)
+  (let loop ([current z])
+    (match-define (zipper sys left right _before _after crumbs) current)
+    (match crumbs
+      ['()
+       (zipper sys
+               (zipper->rope current)
+               (empty-rope sys)
+               (empty-summary sys)
+               (empty-summary sys)
+               '())]
+      [(cons crumb _rest)
+       (if (right-context-crumb? crumb)
+           (match crumb
+             [(opened-left before sibling after)
+              (zipper sys (gap->rope sys crumb left right) sibling before after _rest)]
+             [(opened-leaf-left before sibling after)
+              (zipper sys (gap->rope sys crumb left right) sibling before after _rest)])
+           (loop (up current)))])))
 
 (define ((split-rope sys guide [select identity]) rope)
   (zipper-split
-   ((search guide select) ((start sys) rope))
+   ((navigate guide select) ((start sys) rope))
    values))
+
+(module+ test
+  (require rackunit)
+
+  (define test-sys (system (summary-algebra 0 string-length +)))
+
+  (define (test-rope text)
+    ((string->rope test-sys) text #:chunk-size 2))
+
+  (define ((position-guide count) left _right)
+    (cond
+      [(< left count) 1]
+      [(> left count) -1]
+      [else 0]))
+
+  (define (check-split z before after)
+    (zipper-split z
+                  (lambda (left right)
+                    (check-equal? (rope->string left) before)
+                    (check-equal? (rope->string right) after))))
+
+  (define (split-strings z)
+    (zipper-split z
+                  (lambda (left right)
+                    (list (rope->string left) (rope->string right)))))
+
+  (define (tagged tag)
+    (lambda (next)
+      (cons tag (split-strings next))))
+
+  (test-case "search-step picks one of three continuations"
+    (define z (zipper test-sys (test-rope "ab") (test-rope "cd") 0 0 '()))
+    (check-equal? ((search-step (position-guide 1))
+                   z
+                   (tagged 'left)
+                   (tagged 'stay)
+                   (tagged 'right))
+                  '(left "a" "bcd"))
+    (check-equal? ((search-step (position-guide 2))
+                   z
+                   (tagged 'left)
+                   (tagged 'stay)
+                   (tagged 'right))
+                  '(stay "ab" "cd"))
+    (check-equal? ((search-step (position-guide 3))
+                   z
+                   (tagged 'left)
+                   (tagged 'stay)
+                   (tagged 'right))
+                  '(right "abc" "d")))
+
+  (test-case "navigation-step picks one of five continuations"
+    (define (navigation-choice count)
+      (define z (zipper test-sys (test-rope "ab") (test-rope "cd") 0 0 '()))
+      ((navigation-step (position-guide count))
+       z
+       (tagged 'before)
+       (tagged 'left)
+       (tagged 'stay)
+       (tagged 'right)
+       (tagged 'after)))
+    (check-equal? (navigation-choice 0) '(before "" "abcd"))
+    (check-equal? (navigation-choice 1) '(left "a" "bcd"))
+    (check-equal? (navigation-choice 2) '(stay "ab" "cd"))
+    (check-equal? (navigation-choice 3) '(right "abc" "d"))
+    (check-equal? (navigation-choice 4) '(after "abcd" "")))
+
+  (test-case "guide-navigate adapts a guide to five directions"
+    (define (navigation-choice count)
+      ((guide-navigate test-sys (position-guide count))
+       0 2 2 0))
+    (check-equal? (navigation-choice 0) -2)
+    (check-equal? (navigation-choice 1) -1)
+    (check-equal? (navigation-choice 2) 0)
+    (check-equal? (navigation-choice 3) 1)
+    (check-equal? (navigation-choice 4) 2))
+
+  (test-case "navigate applies the guide-derived navigator"
+    (define z (zipper test-sys (test-rope "ab") (test-rope "cd") 0 0 '()))
+    (check-equal? (split-strings ((navigate (position-guide 1)) z))
+                  '("a" "bcd"))
+    (check-equal? ((navigation-step (position-guide 4))
+                   z
+                   (tagged 'before)
+                   (tagged 'left)
+                   (tagged 'stay)
+                   (tagged 'right)
+                   (tagged 'after))
+                  '(after "abcd" "")))
+
+  (test-case "open-left discovers an empty boundary gap"
+    (define z ((start test-sys) (test-rope "abc")))
+    (define opened (open-left z))
+    (check-equal? (rope->string (zipper-left opened)) "")
+    (check-equal? (rope->string (zipper-right opened)) "")
+    (check-equal? (zipper-before-summary opened) 0)
+    (check-equal? (zipper-after-summary opened) 3)
+    (check-equal? (rope->string (zipper->rope opened)) "abc")
+    (check-equal? (length (zipper-crumbs opened)) 1)
+    (check-equal? (rope->string (zipper-left (up opened))) "")
+    (check-equal? (rope->string (zipper-right (up opened))) "abc"))
+
+  (test-case "open-right discovers an empty boundary gap"
+    (define z (shift-right ((start test-sys) (test-rope "abc"))))
+    (define opened (open-right z))
+    (check-equal? (rope->string (zipper-left opened)) "")
+    (check-equal? (rope->string (zipper-right opened)) "")
+    (check-equal? (zipper-before-summary opened) 3)
+    (check-equal? (zipper-after-summary opened) 0)
+    (check-equal? (rope->string (zipper->rope opened)) "abc")
+    (check-equal? (length (zipper-crumbs opened)) 1)
+    (check-equal? (rope->string (zipper-left (up opened))) "abc")
+    (check-equal? (rope->string (zipper-right (up opened))) ""))
+
+  (test-case "insert-left inserts before the gap and leaves cursor after insertion"
+    (define z ((navigate (position-guide 2)) ((start test-sys) (test-rope "abcd"))))
+    (define inserted (test-rope "XY"))
+    (define edited (insert-left z inserted))
+    (check-split edited "abXY" "cd")
+    (check-equal? (rope->string (zipper->rope edited)) "abXYcd"))
+
+  (test-case "insert-right inserts after the gap and leaves cursor before insertion"
+    (define z ((navigate (position-guide 2)) ((start test-sys) (test-rope "abcd"))))
+    (define inserted (test-rope "XY"))
+    (define edited (insert-right z inserted))
+    (check-split edited "ab" "XYcd")
+    (check-equal? (rope->string (zipper->rope edited)) "abXYcd"))
+
+  (test-case "search descends through the right piece"
+    (define z ((start test-sys) (test-rope "abc")))
+    (check-split ((search (position-guide 1)) z) "a" "bc"))
+
+  (test-case "search descends through the left piece"
+    (define z (shift-right ((start test-sys) (test-rope "abc"))))
+    (check-split ((search (position-guide 1)) z) "a" "bc"))
+
+  (test-case "navigate searches from either side"
+    (define z ((start test-sys) (test-rope "abcd")))
+    (define end-z (shift-right z))
+    (check-split ((navigate (position-guide 0)) z) "" "abcd")
+    (check-split ((navigate (position-guide 2)) z) "ab" "cd")
+    (check-split ((navigate (position-guide 4)) z) "abcd" "")
+    (check-split ((navigate (position-guide 2)) end-z) "ab" "cd")))
