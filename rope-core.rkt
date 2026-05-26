@@ -18,7 +18,6 @@
  empty-rope?
  branch-rope
  concat-rope
- concat-ropes
  rope-chunks
  rope->string
  string->rope
@@ -116,14 +115,14 @@
     (raise-argument-error 'branch-rope "two ropes" (list left right)))
   (branch left right (summary+ sys (rope-summary left) (rope-summary right))))
 
-(define ((concat-rope sys) left right)
-  (cond
-    [(empty-rope? left) right]
-    [(empty-rope? right) left]
-    [else ((branch-rope sys) left right)]))
-
-(define ((concat-ropes sys) ropes)
-  (foldr (concat-rope sys) (empty-rope sys) ropes))
+(define ((concat-rope sys) . ropes)
+  (foldr (lambda (left right)
+           (cond
+             [(empty-rope? left) right]
+             [(empty-rope? right) left]
+             [else ((branch-rope sys) left right)]))
+         (empty-rope sys)
+         ropes))
 
 (define (rope-chunks rope)
   (match rope
