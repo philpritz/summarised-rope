@@ -1,6 +1,7 @@
 #lang racket
 
 (require rackunit
+         "../rope-core.rkt"
          "../zipper-core.rkt"
          "../summary-algebras.rkt")
 

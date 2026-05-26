@@ -2,6 +2,7 @@
 
 (require racket/contract
          racket/match
+         "rope-core.rkt"
          "zipper-core.rkt")
 
 (provide
