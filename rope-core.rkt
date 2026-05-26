@@ -18,6 +18,7 @@
  empty-rope?
  branch-rope
  concat-rope
+ concat-ropes
  rope-chunks
  rope->string
  string->rope
@@ -120,6 +121,9 @@
     [(empty-rope? left) right]
     [(empty-rope? right) left]
     [else ((branch-rope sys) left right)]))
+
+(define ((concat-ropes sys) ropes)
+  (foldr (concat-rope sys) (empty-rope sys) ropes))
 
 (define (rope-chunks rope)
   (match rope
