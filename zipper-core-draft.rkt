@@ -1,6 +1,7 @@
 #lang racket
 
 (require racket/match
+         struct-update
          "rope-core.rkt")
 
 (provide
@@ -9,6 +10,8 @@
  (struct-out seg)
  (struct-out opened-left)
  (struct-out opened-right)
+ (struct-out guide)
+ update-guide-index
  gap->seg
  insert
  seg->gap
@@ -26,7 +29,8 @@
  open-straddling
  rise-from-left
  rise-from-centre
- rise-from-right)
+ rise-from-right
+ navigate)
 
 (struct zipper (sys head before-summary after-summary crumbs)
   #:transparent)
@@ -222,3 +226,52 @@
                         '(-2 -1 0)))
            z]
           [else (loop (up z (concat-rope sys)))])))))
+
+;; ---------- guide ----------
+;;
+;; A guide is a callable struct carrying everything needed to make a
+;; decision and to manipulate its target index:
+;;
+;;   decide   : (slice-l, slice-r, index) -> -1 | 0 | 1
+;;   selector : full-summary -> slice              ; pulls relevant component
+;;                                                 ; out of a bundle summary
+;;   read     : (slice-l, slice-r) -> index        ; current index from summaries
+;;   index    : the target address
+;;
+;; (decide, selector, read) together form the "kind"; only `index` varies
+;; per instance. Curried partial application gives a kind without needing a
+;; separate struct: e.g. (curry guide d s r) is a kind awaiting an index.
+
+(struct guide (decide selector read index)
+  #:transparent
+  #:property prop:procedure
+  (lambda (self l r)
+    ((guide-decide self) ((guide-selector self) l)
+                         ((guide-selector self) r)
+                         (guide-index self))))
+
+(define-struct-updaters guide [index])
+
+;; ---------- navigate ----------
+;;
+;; Rise until the target sits inside the local subtree, then descend by
+;; splitting toward whichever side the guide points at. The guide is a
+;; callable (function or guide-struct) of two summaries returning -1/0/1.
+
+(define (navigate z g)
+  (define sys (zipper-sys z))
+  (let rise ([z z])
+    (match-define (zipper _ (gap left right) before after _) z)
+    (define local (summary+ sys (rope-summary left) (rope-summary right)))
+    (cond
+      [(or (negative? (g before (summary+ sys local after)))
+           (positive? (g (summary+ sys before local) after)))
+       (rise (up z (concat-rope sys)))]
+      [else
+       (let search ([z z])
+         (match-define (zipper _ (gap L R) B A _) z)
+         (case (g (summary+ sys B (rope-summary L))
+                  (summary+ sys (rope-summary R) A))
+           [(0)  z]
+           [(-1) (search (open-split-left  z g))]
+           [(1)  (search (open-split-right z g))]))])))
