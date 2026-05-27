@@ -21,6 +21,8 @@
  start
  open-left
  open-right
+ open-split-left
+ open-split-right
  open-seg-left
  open-seg-right
  open-straddling
@@ -108,19 +110,62 @@
           (empty-summary sys)
           '()))
 
-;; ---------- open-* ----------
+;; ---------- one-step opens (no guide) ----------
 ;;
-;; open-left  : descend into the current gap's left side using a gap guide.
-;;              Splits the left rope at the guide's target, then makes a new
-;;              gap head whose two halves are the split. The current right
-;;              side gets stashed in the crumb as the sibling.
+;; open-left  : descend one structural level into the current gap's left
+;;              side. If left is a branch, new gap = (branch-left, branch-right).
+;;              If left is a splittable leaf, halve it. If left is atomic
+;;              (length 1) or empty, push it across to the right side without
+;;              pushing a crumb.
 ;;
 ;; open-right : symmetric on the right side.
-;;
-;; The seg variants (open-seg-left / open-seg-right) are the same shape but
-;; use seg-split-rope, producing a seg head with the carved-out segment as m.
 
-(define (open-left z guide)
+(define (open-left z)
+  (match-define (zipper sys (gap left right) before after crumbs) z)
+  (match left
+    [(branch child-left child-right _)
+     (define child-after (summary+ sys (rope-summary right) after))
+     (define crumb (opened-left before right after))
+     (zipper sys (gap child-left child-right) before child-after (cons crumb crumbs))]
+    [(or (leaf _ _) (leaf-range _ _ _ _))
+     (cond
+       [(<= (leaf-piece-length left) 1)
+        (zipper sys
+                (gap (empty-rope sys) (leaf-join sys left right))
+                before after crumbs)]
+       [else
+        (define-values (lp rp) (split-leaf-piece sys 'open-left left))
+        (define child-after (summary+ sys (rope-summary right) after))
+        (define crumb (opened-leaf-left before right after))
+        (zipper sys (gap lp rp) before child-after (cons crumb crumbs))])]))
+
+(define (open-right z)
+  (match-define (zipper sys (gap left right) before after crumbs) z)
+  (match right
+    [(branch child-left child-right _)
+     (define child-before (summary+ sys before (rope-summary left)))
+     (define crumb (opened-right before left after))
+     (zipper sys (gap child-left child-right) child-before after (cons crumb crumbs))]
+    [(or (leaf _ _) (leaf-range _ _ _ _))
+     (cond
+       [(<= (leaf-piece-length right) 1)
+        (zipper sys
+                (gap (leaf-join sys left right) (empty-rope sys))
+                before after crumbs)]
+       [else
+        (define-values (lp rp) (split-leaf-piece sys 'open-right right))
+        (define child-before (summary+ sys before (rope-summary left)))
+        (define crumb (opened-leaf-right before left after))
+        (zipper sys (gap lp rp) child-before after (cons crumb crumbs))])]))
+
+;; ---------- guide-driven opens (split the tree) ----------
+;;
+;; 2-way variants take a gap guide and produce a new gap head at the guide's
+;; target inside the chosen side. 3-way variants take a seg guide and produce
+;; a seg head carved out of the chosen side. In every case the *other* side
+;; is stashed in the crumb as the sibling.
+
+(define (open-split-left z guide)
   (match-define (zipper sys (gap left right) before after crumbs) z)
   (define child-after (summary+ sys (rope-summary right) after))
   (define-values (nl nr)
@@ -128,7 +173,7 @@
   (define crumb (opened-left before right after))
   (zipper sys (gap nl nr) before child-after (cons crumb crumbs)))
 
-(define (open-right z guide)
+(define (open-split-right z guide)
   (match-define (zipper sys (gap left right) before after crumbs) z)
   (define child-before (summary+ sys before (rope-summary left)))
   (define-values (nl nr)
