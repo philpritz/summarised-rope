@@ -10,7 +10,13 @@
  (struct-out opened-left)
  (struct-out opened-right)
  (struct-out opened-leaf-left)
- (struct-out opened-leaf-right))
+ (struct-out opened-leaf-right)
+ gap->seg
+ insert
+ seg->gap
+ left-bound-gap
+ right-bound-gap
+ delete)
 
 (struct zipper (sys head before-summary after-summary crumbs)
   #:transparent)
@@ -59,3 +65,27 @@
             (piece->rope sys right)
             before
             after)))
+
+(define (gap->seg z decompose)
+  (match-define (zipper sys (gap left right) before after crumbs) z)
+  (define-values (l m r) (decompose left right))
+  (zipper sys (seg l m r) before after crumbs))
+
+(define (insert z content)
+  (gap->seg z (lambda (l r) (values l content r))))
+
+(define (seg->gap z combine)
+  (match-define (zipper sys (seg l m r) before after crumbs) z)
+  (define-values (left right) (combine l m r))
+  (zipper sys (gap left right) before after crumbs))
+
+(define (left-bound-gap z)
+  (define sys (zipper-sys z))
+  (seg->gap z (lambda (l m r) (values l ((concat-rope sys) m r)))))
+
+(define (right-bound-gap z)
+  (define sys (zipper-sys z))
+  (seg->gap z (lambda (l m r) (values ((concat-rope sys) l m) r))))
+
+(define (delete z)
+  (seg->gap z (lambda (l m r) (values l r))))
