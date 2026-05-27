@@ -1,13 +1,14 @@
 # 001 — Circular rope with two marks
 
-Exploratory. **Not the current direction.** This folder mirrors `deprecated/`
-in the opposite temporal direction: experimental sketches that *might*
-become the model, kept here so we can develop them without disturbing the
-present core.
+Exploratory project. **Not the current direction.** Each `future/NNN-*`
+folder is a sibling-to-deprecated workspace: it starts as a snapshot of
+the present core and develops in a direction we're not yet committed to.
 
-This first note gathers the threads from the third 2026-05-27 discussion
-and its follow-on conversation about reverse segments and circular ropes,
-and reframes them as something developable.
+This project explores the circular-rope / always-two-marks model that
+came out of the 2026-05-27 sessions. The `.rkt` files here are a copy
+of the top-level `rope-core.rkt`, `zipper-core.rkt`, and
+`zipper-core-draft.rkt` at the time of branching; from here we modify
+in place.
 
 ## The shift, in one sentence
 
