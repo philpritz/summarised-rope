@@ -5,32 +5,32 @@ This folder keeps compact notes from design sessions.
 ## Naming
 
 Discussion files should be named so chronological order is visible from the
-filename, even when different assistants or collaborators are involved.
+path, even when different assistants or collaborators are involved.
 
-Use:
+Use a date folder, then put the chronological number before the source:
 
 ```text
-discussion-YYYY-MM-DD-<source>-N.md
+discussions/YYYY-MM-DD/N-<source>.md
 ```
 
 where:
 
 - `YYYY-MM-DD` is the session date.
+- `N` is the chronological session number for that date.
 - `<source>` is the main collaborator/source, for example `claude` or
   `chatgpt`.
-- `N` is the chronological session number for that date.
 
 Examples:
 
 ```text
-discussion-2026-05-27-claude-1.md
-discussion-2026-05-27-claude-2.md
-discussion-2026-05-27-claude-3.md
-discussion-2026-05-27-chatgpt-4.md
+discussions/2026-05-27/1-claude.md
+discussions/2026-05-27/2-claude.md
+discussions/2026-05-27/3-claude.md
+discussions/2026-05-27/4-chatgpt.md
 ```
 
-If an older file is missing a number, prefer adding a numbered replacement or
-renaming it when convenient, rather than leaving chronology implicit.
+If an older file is missing a number or uses a flat filename, prefer moving it
+into the date folder when convenient, rather than leaving chronology implicit.
 
 ## Content style
 
