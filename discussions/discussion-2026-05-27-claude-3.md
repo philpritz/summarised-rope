@@ -1,63 +1,77 @@
 # Discussion — 2026-05-27 (third) — with Claude
 
-Very short, partial note. Capturing a paradigm-shift idea that came up
-near the end of the session and was explicitly parked — not the current
-direction, but worth not losing.
+Very short, partial note. Parked idea. The framing here is
+editor-conceptual, not algebra-mechanical — the structural collapse it
+implies (one head shape, one guide, one navigate) is downstream of the
+real claim, which is about how the user interacts with the text.
 
-## The idea: always-seg head
+## The idea: the cursor is two marks, always
 
-Drop the `gap` / `seg` distinction. Every head is a seg
-`(left, middle, right)`. A point cursor is the degenerate case where
-`middle` is the empty rope.
+Most editors model the cursor as a single mark (a position between
+characters). Selection is a *mode* you enter — you hold shift, you drag,
+you press a key — and the editor temporarily tracks a second mark
+until you collapse back.
 
-```racket
-(struct zipper (sys left middle right before after crumbs))
+The shift: drop the single-mark cursor entirely. The user's cursor is
+*always* two marks. A "point cursor" is just the degenerate case where
+the two marks sit at the same position.
+
+```text
+left ^mark1^ middle ^mark2^ right
 ```
 
-No head field, no discriminator.
+There is no mode. There is no "enter selection." The two marks are
+always there; sometimes they coincide, sometimes they don't.
 
-## What unifies
+## What this gives the user
 
-- One head shape.
-- One guide kind (seg-shape, `-2..2`); the old gap-guide is the
-  degenerate seg-guide where the target has zero width.
-- One `navigate`, no dispatch on guide kind.
-- One `relative`; seg-address is always a pair of gap addresses, and
-  point-relative is the equal-endpoints case.
-- `gap->seg`, `seg->gap`, `left-bound-gap`, `right-bound-gap` disappear
-  — shape never changes.
-- `insert`, `delete`, `replace`, `settle-*` all become pure
-  content-on-middle operations: same input shape, same output shape.
+Editing operations stop being modal. Every edit acts on the region
+between the two marks:
 
-## Crumbs
+- **Insert** = fill the region with content. If the marks coincide, the
+  content lands between them (classical insert). If they don't, the
+  selected text is replaced. No distinction between "insert" and
+  "type-over-selection" — same operation.
+- **Delete** = empty the region. If the marks coincide, nothing
+  happens (no character is selected). To delete-left, you first extend
+  one mark leftward; then delete is uniform.
+- **Replace** = same as insert. There is no separate verb.
+- **Move** = move both marks together.
+- **Extend / shrink** = move one mark while leaving the other fixed.
 
-Three variants now, one per descent direction:
-`opened-from-left`, `opened-from-middle`, `opened-from-right`. Each
-stashes the two non-descended pieces of the parent. `up`'s combiner is
-ternary; `concat-rope` is already variadic so this is free.
+Every "command" the user issues is one of: move-both, move-one, or
+fill-the-region. There is no separate selection state to track or
+toggle. The mental model is uniform.
 
-## Costs
+## Why this feels seamless
 
-- Type-level discriminator gone: "can I delete from a point" becomes a
-  runtime "is middle empty" check.
-- Always carry a middle field; cheap in practice (empty leaves
-  singleton-ish, concat-rope short-circuits) but always allocated.
-- "Delete char left" decomposes into two ops (extend-left-by-one,
-  then delete-middle) rather than one. Arguably a win — every
-  delete-by-X composes from the same two primitives.
+The traditional editor has two states (point vs selection) and a set of
+operations that behave differently in each. The user has to know which
+state they're in to predict the outcome of a keypress. Insert in point
+state = insert; insert in selection state = replace. Same key, two
+behaviours.
+
+Under always-two-marks there is one state and one set of operations.
+The behaviour the user predicts is the *same shape* in every case; only
+the width of the region between the marks varies. Type-over-selection
+is just insert-with-a-non-empty-region. Backspace-when-selecting is
+just delete-when-non-empty. The seams between the modes go away because
+the modes go away.
 
 ## Status
 
-Parked. Not the present direction. Open question whether
-address-pair-with-equal-endpoints is the right canonical "point"
-across all summary domains; fine for text positions and sexp paths, less
-obvious for exotic domains.
+Parked. Idea is open-ended and conceptual; not the present direction.
+The implementation collapse it implies (no head discriminator, one
+navigate, one relative, etc.) is large but mechanical — it follows
+from the conceptual shift, not the other way around.
+
+Worth picking up later as: *if* this is how the editor should feel,
+*then* what does the algebra look like to support it cleanly?
 
 ## Where this came from
 
-Came up while working out how to encode seg addresses for relative
-navigation. If seg-address is just a pair of gap addresses, the
-machinery for gap navigation and seg navigation is already nearly the
-same — the gap case is what falls out when the pair's endpoints
-coincide. From there it's a small step to ask whether the head type
-needs to discriminate at all.
+Came up while encoding seg addresses for relative navigation. Once a
+seg-address is just a pair of gap addresses, point-navigation and
+selection-navigation start to look like the same operation with the
+endpoints coinciding or not. That mechanical observation gestured at
+the conceptual one: maybe the editor itself shouldn't distinguish.
