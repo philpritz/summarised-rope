@@ -16,7 +16,8 @@
  seg->gap
  left-bound-gap
  right-bound-gap
- delete)
+ delete
+ up)
 
 (struct zipper (sys head before-summary after-summary crumbs)
   #:transparent)
@@ -24,47 +25,37 @@
 (struct gap (left right) #:transparent)
 (struct seg (left middle right) #:transparent)
 
-;; A gap crumb is a parent context with the current gap as its hole.
-;; Applying one to a child gap rebuilds the same gap at the parent level.
+;; A gap crumb takes the current head's collapsed subtree and pairs it
+;; with the stashed sibling to form the parent gap's left/right.
+;; opened-*-left variants put the sibling on the right (we descended left);
+;; opened-*-right variants put the sibling on the left (we descended right).
 (struct opened-left (before-summary right after-summary)
   #:transparent
   #:property prop:procedure
-  (lambda (self sys left right)
+  (lambda (self _sys subtree)
     (match-define (opened-left before sibling after) self)
-    (values left
-            ((concat-rope sys) right sibling)
-            before
-            after)))
+    (values subtree sibling before after)))
 
 (struct opened-right (before-summary left after-summary)
   #:transparent
   #:property prop:procedure
-  (lambda (self sys left right)
+  (lambda (self _sys subtree)
     (match-define (opened-right before sibling after) self)
-    (values ((concat-rope sys) sibling left)
-            right
-            before
-            after)))
+    (values sibling subtree before after)))
 
 (struct opened-leaf-left (before-summary right after-summary)
   #:transparent
   #:property prop:procedure
-  (lambda (self sys left right)
+  (lambda (self _sys subtree)
     (match-define (opened-leaf-left before sibling after) self)
-    (values (piece->rope sys left)
-            (leaf-join sys right sibling)
-            before
-            after)))
+    (values subtree sibling before after)))
 
 (struct opened-leaf-right (before-summary left after-summary)
   #:transparent
   #:property prop:procedure
-  (lambda (self sys left right)
+  (lambda (self _sys subtree)
     (match-define (opened-leaf-right before sibling after) self)
-    (values (leaf-join sys sibling left)
-            (piece->rope sys right)
-            before
-            after)))
+    (values sibling subtree before after)))
 
 (define (gap->seg z decompose)
   (match-define (zipper sys (gap left right) before after crumbs) z)
@@ -89,3 +80,12 @@
 
 (define (delete z)
   (seg->gap z (lambda (l m r) (values l r))))
+
+(define (up z combine)
+  (match-define (zipper sys (gap left right) before after crumbs) z)
+  (match crumbs
+    ['() z]
+    [(cons crumb rest)
+     (define subtree (combine left right))
+     (define-values (pl pr pb pa) (crumb sys subtree))
+     (zipper sys (gap pl pr) pb pa rest)]))
