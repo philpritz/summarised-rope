@@ -26,7 +26,9 @@
  leaf-join
  leaf-piece-bounds
  leaf-piece-length
- split-leaf-piece)
+ split-leaf-piece
+ split-rope
+ split-whole-rope)
 
 (struct summary-algebra (empty leaf append) #:transparent)
 
@@ -185,3 +187,35 @@
      (define mid (+ start (quotient len 2)))
      (values (make-leaf-range sys text start mid)
              (make-leaf-range sys text mid end))]))
+
+(define ((split-rope sys guide [select identity]) rope before after)
+  (let walk ([rope rope] [before before] [after after])
+    (define (decide L R)
+      (case (guide (select (summary+ sys before (rope-summary L)))
+                   (select (summary+ sys (rope-summary R) after)))
+        [(0) (values L R)]
+        [(-1)
+         (define-values (ll lr)
+           (walk L before (summary+ sys (rope-summary R) after)))
+         (values ll ((concat-rope sys) lr R))]
+        [(1)
+         (define-values (rl rr)
+           (walk R (summary+ sys before (rope-summary L)) after))
+         (values ((concat-rope sys) L rl) rr)]
+        [else (error 'split-rope "guide must return -1, 0, or 1")]))
+    (cond
+      [(branch? rope)
+       (decide (branch-left rope) (branch-right rope))]
+      [(<= (leaf-piece-length rope) 1)
+       (case (guide (select before)
+                    (select (summary+ sys (rope-summary rope) after)))
+         [(-1 0) (values (empty-rope sys) rope)]
+         [(1) (values rope (empty-rope sys))]
+         [else (error 'split-rope "guide must return -1, 0, or 1")])]
+      [else
+       (define-values (l-piece r-piece)
+         (split-leaf-piece sys 'split-rope rope))
+       (decide (piece->rope sys l-piece) (piece->rope sys r-piece))])))
+
+(define ((split-whole-rope sys guide [select identity]) rope)
+  ((split-rope sys guide select) rope (empty-summary sys) (empty-summary sys)))
