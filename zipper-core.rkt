@@ -9,8 +9,6 @@
  (struct-out seg)
  (struct-out opened-left)
  (struct-out opened-right)
- (struct-out opened-leaf-left)
- (struct-out opened-leaf-right)
  gap->seg
  insert
  seg->gap
@@ -27,8 +25,8 @@
 
 ;; A gap crumb takes the current head's collapsed subtree and pairs it
 ;; with the stashed sibling to form the parent gap's left/right.
-;; opened-*-left variants put the sibling on the right (we descended left);
-;; opened-*-right variants put the sibling on the left (we descended right).
+;; opened-left: sibling on the right (we descended left).
+;; opened-right: sibling on the left (we descended right).
 (struct opened-left (before-summary right after-summary)
   #:transparent
   #:property prop:procedure
@@ -41,20 +39,6 @@
   #:property prop:procedure
   (lambda (self _sys subtree)
     (match-define (opened-right before sibling after) self)
-    (values sibling subtree before after)))
-
-(struct opened-leaf-left (before-summary right after-summary)
-  #:transparent
-  #:property prop:procedure
-  (lambda (self _sys subtree)
-    (match-define (opened-leaf-left before sibling after) self)
-    (values subtree sibling before after)))
-
-(struct opened-leaf-right (before-summary left after-summary)
-  #:transparent
-  #:property prop:procedure
-  (lambda (self _sys subtree)
-    (match-define (opened-leaf-right before sibling after) self)
     (values sibling subtree before after)))
 
 (define (gap->seg z decompose)
