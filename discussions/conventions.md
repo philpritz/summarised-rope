@@ -32,6 +32,15 @@ discussions/2026-05-27/4-chatgpt.md
 If an older file is missing a number or uses a flat filename, prefer moving it
 into the date folder when convenient, rather than leaving chronology implicit.
 
+## Collaboration style
+
+Keep project discussions tight and user-led:
+
+- Let the user propose ideas first.
+- Do not go off designing or thinking ahead independently.
+- Avoid fluff.
+- Keep responses compact unless more detail is requested.
+
 ## Content style
 
 Keep notes compact and durable:
