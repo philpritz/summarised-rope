@@ -9,8 +9,6 @@
  (struct-out seg)
  (struct-out opened-left)
  (struct-out opened-right)
- (struct-out opened-leaf-left)
- (struct-out opened-leaf-right)
  gap->seg
  insert
  seg->gap
@@ -38,8 +36,8 @@
 
 ;; A gap crumb takes the current head's collapsed subtree and pairs it
 ;; with the stashed sibling to form the parent gap's left/right.
-;; opened-*-left variants put the sibling on the right (we descended left);
-;; opened-*-right variants put the sibling on the left (we descended right).
+;; opened-left: sibling on the right (we descended left).
+;; opened-right: sibling on the left (we descended right).
 (struct opened-left (before-summary right after-summary)
   #:transparent
   #:property prop:procedure
@@ -52,20 +50,6 @@
   #:property prop:procedure
   (lambda (self _sys subtree)
     (match-define (opened-right before sibling after) self)
-    (values sibling subtree before after)))
-
-(struct opened-leaf-left (before-summary right after-summary)
-  #:transparent
-  #:property prop:procedure
-  (lambda (self _sys subtree)
-    (match-define (opened-leaf-left before sibling after) self)
-    (values subtree sibling before after)))
-
-(struct opened-leaf-right (before-summary left after-summary)
-  #:transparent
-  #:property prop:procedure
-  (lambda (self _sys subtree)
-    (match-define (opened-leaf-right before sibling after) self)
     (values sibling subtree before after)))
 
 (define (gap->seg z decompose)
@@ -122,41 +106,29 @@
 
 (define (open-left z)
   (match-define (zipper sys (gap left right) before after crumbs) z)
-  (match left
-    [(branch child-left child-right _)
-     (define child-after (summary+ sys (rope-summary right) after))
-     (define crumb (opened-left before right after))
-     (zipper sys (gap child-left child-right) before child-after (cons crumb crumbs))]
-    [(or (leaf _ _) (leaf-range _ _ _ _))
-     (cond
-       [(<= (leaf-piece-length left) 1)
-        (zipper sys
-                (gap (empty-rope sys) (leaf-join sys left right))
-                before after crumbs)]
-       [else
-        (define-values (lp rp) (split-leaf-piece sys 'open-left left))
-        (define child-after (summary+ sys (rope-summary right) after))
-        (define crumb (opened-leaf-left before right after))
-        (zipper sys (gap lp rp) before child-after (cons crumb crumbs))])]))
+  (define-values (nl nr)
+    (match left
+      [(branch child-left child-right _) (values child-left child-right)]
+      [(or (leaf _ _) (leaf-range _ _ _ _))
+       (cond
+         [(<= (leaf-piece-length left) 1) (values (empty-rope sys) left)]
+         [else (split-leaf-piece sys 'open-left left)])]))
+  (define child-after (summary+ sys (rope-summary right) after))
+  (define crumb (opened-left before right after))
+  (zipper sys (gap nl nr) before child-after (cons crumb crumbs)))
 
 (define (open-right z)
   (match-define (zipper sys (gap left right) before after crumbs) z)
-  (match right
-    [(branch child-left child-right _)
-     (define child-before (summary+ sys before (rope-summary left)))
-     (define crumb (opened-right before left after))
-     (zipper sys (gap child-left child-right) child-before after (cons crumb crumbs))]
-    [(or (leaf _ _) (leaf-range _ _ _ _))
-     (cond
-       [(<= (leaf-piece-length right) 1)
-        (zipper sys
-                (gap (leaf-join sys left right) (empty-rope sys))
-                before after crumbs)]
-       [else
-        (define-values (lp rp) (split-leaf-piece sys 'open-right right))
-        (define child-before (summary+ sys before (rope-summary left)))
-        (define crumb (opened-leaf-right before left after))
-        (zipper sys (gap lp rp) child-before after (cons crumb crumbs))])]))
+  (define-values (nl nr)
+    (match right
+      [(branch child-left child-right _) (values child-left child-right)]
+      [(or (leaf _ _) (leaf-range _ _ _ _))
+       (cond
+         [(<= (leaf-piece-length right) 1) (values right (empty-rope sys))]
+         [else (split-leaf-piece sys 'open-right right)])]))
+  (define child-before (summary+ sys before (rope-summary left)))
+  (define crumb (opened-right before left after))
+  (zipper sys (gap nl nr) child-before after (cons crumb crumbs)))
 
 ;; ---------- guide-driven opens (split the tree) ----------
 ;;
