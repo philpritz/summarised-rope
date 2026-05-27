@@ -36,7 +36,10 @@
 ;; cursor/editor state, or in a richer navigation-mode abstraction.
 
 (struct zipper (sys head before-summary after-summary crumbs guide)
-  #:transparent)
+  #:transparent
+  #:property prop:custom-write
+  (lambda (z out _mode)
+    (print-zipper z out)))
 
 (struct gap (left right) #:transparent)
 (struct seg (left middle right) #:transparent)
@@ -323,3 +326,55 @@
   ;; Preserve the exact guide instance used to navigate, keeping the head and
   ;; installed guide index linked by construction.
   (struct-copy zipper moved [guide new-guide]))
+
+;; ---------- printer ----------
+
+(define preview-width 60)
+
+(define (preview rope #:side side)
+  (define s (rope->string rope))
+  (define n (string-length s))
+  (cond
+    [(<= n preview-width) s]
+    [(eq? side 'left)
+     (string-append "…" (substring s (- n preview-width)))]
+    [else
+     (string-append (substring s 0 preview-width) "…")]))
+
+(define (guide-name g)
+  (cond
+    [(gap-guide? g) 'gap-guide]
+    [(seg-guide? g) 'seg-guide]
+    [else 'unknown-guide]))
+
+(define (print-zipper z out)
+  (match-define (zipper sys head before after crumbs guide) z)
+
+  (define (p fmt . xs)
+    (apply fprintf out fmt xs))
+
+  (p "zipper: ~a\n" (if (gap? head) 'gap 'seg))
+  (p "guide: ~a\n" (guide-name guide))
+  (p "index: ~s\n\n" (guide-index guide))
+
+  (match head
+    [(gap left right)
+     (p "cursor-left:  ~s ^\n" (preview left #:side 'left))
+     (p "cursor-right: ^ ~s\n\n" (preview right #:side 'right))
+     (p "left-total-summary:  ~s\n"
+        (summary+ sys before (rope-summary left)))
+     (p "right-total-summary: ~s\n"
+        (summary+ sys (rope-summary right) after))]
+
+    [(seg left middle right)
+     (p "segment-left:   ~s\n" (preview left #:side 'left))
+     (p "segment-middle: ~s\n" (rope->string middle))
+     (p "segment-right:  ~s\n\n" (preview right #:side 'right))
+     (p "left-total-summary:  ~s\n"
+        (summary+ sys before (rope-summary left)))
+     (p "middle-summary:      ~s\n"
+        (rope-summary middle))
+     (p "right-total-summary: ~s\n"
+        (summary+ sys (rope-summary right) after))])
+
+  (p "\ncrumbs: ~a" (length crumbs)))
