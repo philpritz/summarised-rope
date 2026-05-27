@@ -28,7 +28,9 @@
  leaf-piece-length
  split-leaf-piece
  split-rope
- split-whole-rope)
+ split-whole-rope
+ seg-split-rope
+ seg-split-whole-rope)
 
 (struct summary-algebra (empty leaf append) #:transparent)
 
@@ -219,3 +221,21 @@
 
 (define ((split-whole-rope sys guide [select identity]) rope)
   ((split-rope sys guide select) rope (empty-summary sys) (empty-summary sys)))
+
+(define ((seg-split-rope sys seg-guide [select identity]) rope before after)
+  (define ((boundary offset) selected-left selected-right)
+    (sgn (+ (seg-guide selected-left selected-right) offset)))
+  (define-values (l rest)
+    ((split-rope sys (boundary -1) select) rope before after))
+  (define-values (m r)
+    ((split-rope sys (boundary 1) select)
+     rest
+     (summary+ sys before (rope-summary l))
+     after))
+  (values l m r))
+
+(define ((seg-split-whole-rope sys seg-guide [select identity]) rope)
+  ((seg-split-rope sys seg-guide select)
+   rope
+   (empty-summary sys)
+   (empty-summary sys)))
