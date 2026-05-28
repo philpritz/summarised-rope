@@ -59,7 +59,6 @@ only a draft artifact.
 
 ## Merging to master
 
-When asked to upload or push work to GitHub, merge it into `master` by
-default, unless asked to keep it on a feature branch. This convention is
-about what an upload request means; it is not standing permission to merge
-without being asked.
+An upload request — "push to GitHub", "upload this", and the like — means
+merge the work into `master` by default. Work stays on a feature branch only
+when that is explicitly requested.
