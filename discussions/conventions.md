@@ -41,6 +41,12 @@ Keep project discussions tight and user-led:
 - Avoid fluff.
 - Keep responses compact unless more detail is requested.
 
+## When to record
+
+Do not be eager to write discussion notes. Recording happens when the user
+decides to finish the session, not mid-thread. Keep designing until then;
+write the note only when the user calls the session done.
+
 ## Content style
 
 Keep notes compact and durable:
