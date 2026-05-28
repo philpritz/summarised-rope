@@ -65,6 +65,7 @@ only a draft artifact.
 
 ## Merging to master
 
-An upload request — "push to GitHub", "upload this", and the like — means
-merge the work into `master` by default. Work stays on a feature branch only
-when that is explicitly requested.
+Work accumulates on the session's feature branch. Keep committing and pushing
+there throughout the session; merge into `master` only when the user explicitly
+asks for it. An upload request — "push to GitHub", "upload this", and the like —
+means push the current feature branch, not merge to master.
