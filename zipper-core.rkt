@@ -105,17 +105,17 @@
 ;; ---------- shape transforms ----------
 
 (define (gap->seg z decompose)
-  (match-define (zipper sys (gap left right) before after crumbs guide) z)
+  (match-define (gap left right) (zipper-head z))
   (define-values (l m r) (decompose left right))
-  (zipper sys (seg l m r) before after crumbs guide))
+  (struct-copy zipper z [head (seg l m r)]))
 
 (define (insert z content)
   (gap->seg z (lambda (l r) (values l content r))))
 
 (define (seg->gap z combine)
-  (match-define (zipper sys (seg l m r) before after crumbs guide) z)
+  (match-define (seg l m r) (zipper-head z))
   (define-values (left right) (combine l m r))
-  (zipper sys (gap left right) before after crumbs guide))
+  (struct-copy zipper z [head (gap left right)]))
 
 (define (left-bound-gap z)
   (define sys (zipper-sys z))
@@ -138,13 +138,16 @@
     [_ (raise-argument-error 'ensure-gap "zipper?" z)]))
 
 (define (up z combine)
-  (match-define (zipper sys (gap left right) before after crumbs guide) z)
+  (match-define (zipper sys (gap left right) _ _ crumbs _) z)
   (match crumbs
     ['() z]
     [(cons crumb rest)
-     (define subtree (combine left right))
-     (define-values (pl pr pb pa) (crumb sys subtree))
-     (zipper sys (gap pl pr) pb pa rest guide)]))
+     (define-values (pl pr pb pa) (crumb sys (combine left right)))
+     (struct-copy zipper z
+       [head (gap pl pr)]
+       [before-summary pb]
+       [after-summary pa]
+       [crumbs rest])]))
 
 (define (root z)
   (let loop ([z (ensure-gap z)])
@@ -165,111 +168,84 @@
 ;; ---------- structural opens ----------
 
 (define (open-left z)
-  (match-define (zipper sys (gap left right) before after crumbs guide) z)
+  (match-define (zipper sys (gap left right) before after crumbs _) z)
   (match left
     [(branch cl cr _)
-     (zipper sys
-             (gap cl cr)
-             before
-             (summary+ sys (rope-summary right) after)
-             (cons (opened-left before right after) crumbs)
-             guide)]
+     (struct-copy zipper z
+       [head (gap cl cr)]
+       [after-summary (summary+ sys (rope-summary right) after)]
+       [crumbs (cons (opened-left before right after) crumbs)])]
     [(or (leaf _ _) (leaf-range _ _ _ _))
      (if (<= (leaf-piece-length left) 1)
          ;; Atomic/empty: push across at the same level, no crumb.
-         (zipper sys
-                 (gap (empty-rope sys) ((concat-rope sys) left right))
-                 before
-                 after
-                 crumbs
-                 guide)
+         (struct-copy zipper z
+           [head (gap (empty-rope sys) ((concat-rope sys) left right))])
          (let-values ([(nl nr) (split-leaf-piece sys 'open-left left)])
-           (zipper sys
-                   (gap nl nr)
-                   before
-                   (summary+ sys (rope-summary right) after)
-                   (cons (opened-left before right after) crumbs)
-                   guide)))]))
+           (struct-copy zipper z
+             [head (gap nl nr)]
+             [after-summary (summary+ sys (rope-summary right) after)]
+             [crumbs (cons (opened-left before right after) crumbs)])))]))
 
 (define (open-right z)
-  (match-define (zipper sys (gap left right) before after crumbs guide) z)
+  (match-define (zipper sys (gap left right) before after crumbs _) z)
   (match right
     [(branch cl cr _)
-     (zipper sys
-             (gap cl cr)
-             (summary+ sys before (rope-summary left))
-             after
-             (cons (opened-right before left after) crumbs)
-             guide)]
+     (struct-copy zipper z
+       [head (gap cl cr)]
+       [before-summary (summary+ sys before (rope-summary left))]
+       [crumbs (cons (opened-right before left after) crumbs)])]
     [(or (leaf _ _) (leaf-range _ _ _ _))
      (if (<= (leaf-piece-length right) 1)
          ;; Atomic/empty: push across at the same level, no crumb.
-         (zipper sys
-                 (gap ((concat-rope sys) left right) (empty-rope sys))
-                 before
-                 after
-                 crumbs
-                 guide)
+         (struct-copy zipper z
+           [head (gap ((concat-rope sys) left right) (empty-rope sys))])
          (let-values ([(nl nr) (split-leaf-piece sys 'open-right right)])
-           (zipper sys
-                   (gap nl nr)
-                   (summary+ sys before (rope-summary left))
-                   after
-                   (cons (opened-right before left after) crumbs)
-                   guide)))]))
+           (struct-copy zipper z
+             [head (gap nl nr)]
+             [before-summary (summary+ sys before (rope-summary left))]
+             [crumbs (cons (opened-right before left after) crumbs)])))]))
 
 (define (open-split-left z g)
-  (match-define (zipper sys (gap left right) before after crumbs guide) z)
-  (define child-after (summary+ sys (rope-summary right) after))
-  (define-values (nl nr) ((split-rope sys g) left before child-after))
-  (zipper sys
-          (gap nl nr)
-          before
-          child-after
-          (cons (opened-left before right after) crumbs)
-          guide))
+  (match-define (zipper sys (gap left right) before after crumbs _) z)
+  (let*-values ([(child-after) (summary+ sys (rope-summary right) after)]
+                [(nl nr)       ((split-rope sys g) left before child-after)])
+    (struct-copy zipper z
+      [head (gap nl nr)]
+      [after-summary child-after]
+      [crumbs (cons (opened-left before right after) crumbs)])))
 
 (define (open-split-right z g)
-  (match-define (zipper sys (gap left right) before after crumbs guide) z)
-  (define child-before (summary+ sys before (rope-summary left)))
-  (define-values (nl nr) ((split-rope sys g) right child-before after))
-  (zipper sys
-          (gap nl nr)
-          child-before
-          after
-          (cons (opened-right before left after) crumbs)
-          guide))
+  (match-define (zipper sys (gap left right) before after crumbs _) z)
+  (let*-values ([(child-before) (summary+ sys before (rope-summary left))]
+                [(nl nr)        ((split-rope sys g) right child-before after)])
+    (struct-copy zipper z
+      [head (gap nl nr)]
+      [before-summary child-before]
+      [crumbs (cons (opened-right before left after) crumbs)])))
 
 (define (open-seg-left z g)
-  (match-define (zipper sys (gap left right) before after crumbs guide) z)
-  (define child-after (summary+ sys (rope-summary right) after))
-  (define-values (l m r) ((seg-split-rope sys g) left before child-after))
-  (zipper sys
-          (seg l m r)
-          before
-          child-after
-          (cons (opened-left before right after) crumbs)
-          guide))
+  (match-define (zipper sys (gap left right) before after crumbs _) z)
+  (let*-values ([(child-after) (summary+ sys (rope-summary right) after)]
+                [(l m r)       ((seg-split-rope sys g) left before child-after)])
+    (struct-copy zipper z
+      [head (seg l m r)]
+      [after-summary child-after]
+      [crumbs (cons (opened-left before right after) crumbs)])))
 
 (define (open-seg-right z g)
-  (match-define (zipper sys (gap left right) before after crumbs guide) z)
-  (define child-before (summary+ sys before (rope-summary left)))
-  (define-values (l m r) ((seg-split-rope sys g) right child-before after))
-  (zipper sys
-          (seg l m r)
-          child-before
-          after
-          (cons (opened-right before left after) crumbs)
-          guide))
+  (match-define (zipper sys (gap left right) before after crumbs _) z)
+  (let*-values ([(child-before) (summary+ sys before (rope-summary left))]
+                [(l m r)        ((seg-split-rope sys g) right child-before after)])
+    (struct-copy zipper z
+      [head (seg l m r)]
+      [before-summary child-before]
+      [crumbs (cons (opened-right before left after) crumbs)])))
 
 (define (open-straddling z g)
-  (match-define (zipper sys (gap left right) before after crumbs guide) z)
+  (match-define (zipper sys (gap left right) before after _ _) z)
   (define-values (l m r)
-    ((seg-split-rope sys g)
-     ((concat-rope sys) left right)
-     before
-     after))
-  (zipper sys (seg l m r) before after crumbs guide))
+    ((seg-split-rope sys g) ((concat-rope sys) left right) before after))
+  (struct-copy zipper z [head (seg l m r)]))
 
 ;; ---------- navigation ----------
 
