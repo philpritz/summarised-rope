@@ -56,3 +56,8 @@ Keep notes compact and durable:
 When a discussion produces code, include a short status section that says what
 is complete, what is not complete, and whether the work is ready to promote or
 only a draft artifact.
+
+## Merging to master
+
+Merge finished work into `master` by default, without waiting to be asked.
+Only leave changes unmerged on a feature branch when explicitly requested.
