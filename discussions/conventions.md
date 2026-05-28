@@ -59,5 +59,7 @@ only a draft artifact.
 
 ## Merging to master
 
-Merge finished work into `master` by default, without waiting to be asked.
-Only leave changes unmerged on a feature branch when explicitly requested.
+When asked to upload or push work to GitHub, merge it into `master` by
+default, unless asked to keep it on a feature branch. This convention is
+about what an upload request means; it is not standing permission to merge
+without being asked.
