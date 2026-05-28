@@ -63,12 +63,13 @@
     (match-define (opened-right before sibling after) self)
     (values sibling subtree before after)))
 
-;; One guide struct. `type` ('gap or 'seg) selects the navigation strategy;
-;; the navigator owns how to move, the guide only carries the decision. `decide`
-;; returns the sign(s) the navigator searches on, reading summaries through
-;; `selector`. A move rebuilds the guide with `struct-copy` on `index`, which
-;; assumes the kind (type/decide) is fixed across indices.
-(struct guide (type decide selector index)
+;; One guide struct. `gap/seg-type` ('gap or 'seg) selects the navigation
+;; strategy; the navigator owns how to move, the guide only carries the
+;; decision. `decide` returns the sign(s) the navigator searches on, reading
+;; summaries through `selector`. A move rebuilds the guide with `struct-copy` on
+;; `index`, which assumes the kind (gap/seg-type and decide) is fixed across
+;; indices.
+(struct guide (gap/seg-type decide selector index)
   #:transparent
   #:property prop:procedure
   (lambda (self l r)
@@ -225,7 +226,7 @@
 ;; ---------- navigation ----------
 
 (define (navigate z g)
-  (case (and (guide? g) (guide-type g))
+  (case (and (guide? g) (guide-gap/seg-type g))
     [(gap) (navigate-gap z g)]
     [(seg) (navigate-seg z g)]
     [else
