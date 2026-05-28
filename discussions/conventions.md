@@ -70,5 +70,7 @@ Two distinct actions, not to be conflated:
 - **Push the feature branch.** Committing and pushing to the session's feature
   branch is routine — it just syncs the branch to the remote. Plain "push" /
   "upload to GitHub" requests mean this, and it is *not* a merge to master.
-- **Merge to master.** Only on an explicit instruction such as "merge to
-  master". Never fold the feature branch into `master` without it.
+- **Merge to master.** Only when the request explicitly contains the word
+  "merge" or "master" — e.g. "merge to master", "push to master", "merge this".
+  Plain "push" / "upload" never triggers it; without one of those words, the
+  feature branch is never folded into `master`.
