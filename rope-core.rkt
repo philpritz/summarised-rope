@@ -27,6 +27,8 @@
  leaf-piece-bounds
  leaf-piece-length
  split-leaf-piece
+ rope-atomic?
+ rope-children
  split-rope
  split-whole-rope
  seg-split-rope
@@ -190,6 +192,21 @@
      (values (make-leaf-range sys text start mid)
              (make-leaf-range sys text mid end))]))
 
+;; A rope node is "atomic" when it cannot be divided any further: an empty or
+;; single-character leaf. Everything else is a divisible node with two children.
+(define (rope-atomic? rope)
+  (and (not (branch? rope))
+       (<= (leaf-piece-length rope) 1)))
+
+;; The two children of a divisible node, hiding the leaf/branch distinction: a
+;; branch yields its stored children, a multi-character leaf simulates a branch
+;; by splitting into halves. Callers descend uniformly without matching on the
+;; node kind. Must not be called on an atomic node.
+(define (rope-children sys rope)
+  (if (branch? rope)
+      (values (branch-left rope) (branch-right rope))
+      (split-leaf-piece sys 'rope-children rope)))
+
 (define ((split-rope sys guide [select identity]) rope before after)
   (let walk ([rope rope] [before before] [after after])
     (define (decide L R)
@@ -206,18 +223,15 @@
          (values ((concat-rope sys) L rl) rr)]
         [else (error 'split-rope "guide must return -1, 0, or 1")]))
     (cond
-      [(branch? rope)
-       (decide (branch-left rope) (branch-right rope))]
-      [(<= (leaf-piece-length rope) 1)
+      [(rope-atomic? rope)
        (case (guide (select before)
                     (select (summary+ sys (rope-summary rope) after)))
          [(-1 0) (values (empty-rope sys) rope)]
          [(1) (values rope (empty-rope sys))]
          [else (error 'split-rope "guide must return -1, 0, or 1")])]
       [else
-       (define-values (l-piece r-piece)
-         (split-leaf-piece sys 'split-rope rope))
-       (decide (piece->rope sys l-piece) (piece->rope sys r-piece))])))
+       (define-values (L R) (rope-children sys rope))
+       (decide L R)])))
 
 (define ((split-whole-rope sys guide [select identity]) rope)
   ((split-rope sys guide select) rope (empty-summary sys) (empty-summary sys)))
