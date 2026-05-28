@@ -22,7 +22,11 @@
  right-bound-gap
  delete
  replace
- navigate)
+ navigate
+ gap-document-ropes
+ gap-document-strings
+ seg-document-ropes
+ seg-document-strings)
 
 ;; The zipper carries one active guide.
 ;;
@@ -302,54 +306,60 @@
   ;; installed guide index linked by construction.
   (struct-copy zipper moved [guide new-guide]))
 
+;; ---------- document views ----------
+
+;; Reconstruct the whole-document ropes around the cursor by walking crumbs
+;; outward while preserving the current gap/seg boundary. Rising with `root`
+;; would not necessarily preserve that boundary, so these rebuild the document
+;; sides directly from the stashed siblings.
+
+(define (gap-document-ropes z)
+  (match-define (zipper sys (gap left right) _ _ crumbs _) z)
+  (let loop ([left left] [right right] [crumbs crumbs])
+    (match crumbs
+      ['() (values left right)]
+      [(cons (opened-left _ sibling _) rest)
+       (loop left ((concat-rope sys) right sibling) rest)]
+      [(cons (opened-right _ sibling _) rest)
+       (loop ((concat-rope sys) sibling left) right rest)])))
+
+(define (seg-document-ropes z)
+  (match-define (zipper sys (seg left middle right) _ _ crumbs _) z)
+  (let loop ([left left] [right right] [crumbs crumbs])
+    (match crumbs
+      ['() (values left middle right)]
+      [(cons (opened-left _ sibling _) rest)
+       (loop left ((concat-rope sys) right sibling) rest)]
+      [(cons (opened-right _ sibling _) rest)
+       (loop ((concat-rope sys) sibling left) right rest)])))
+
+(define (gap-document-strings z)
+  (define-values (l r) (gap-document-ropes z))
+  (values (rope->string l) (rope->string r)))
+
+(define (seg-document-strings z)
+  (define-values (l m r) (seg-document-ropes z))
+  (values (rope->string l) (rope->string m) (rope->string r)))
+
 ;; ---------- printer ----------
+
+;; Show the whole document with the cursor inline: `^` marks a gap, `⟦…⟧`
+;; brackets a selected segment. Long outer context is clipped with `…`.
 
 (define preview-width 60)
 
-(define (preview rope #:side side)
-  (define s (rope->string rope))
+(define (clip s side)
   (define n (string-length s))
   (cond
     [(<= n preview-width) s]
-    [(eq? side 'left)
-     (string-append "…" (substring s (- n preview-width)))]
-    [else
-     (string-append (substring s 0 preview-width) "…")]))
-
-(define (guide-name g)
-  (cond
-    [(gap-guide? g) 'gap-guide]
-    [(seg-guide? g) 'seg-guide]
-    [else 'unknown-guide]))
+    [(eq? side 'left)  (string-append "…" (substring s (- n preview-width)))]
+    [else              (string-append (substring s 0 preview-width) "…")]))
 
 (define (print-zipper z out)
-  (match-define (zipper sys head before after crumbs guide) z)
-
-  (define (p fmt . xs)
-    (apply fprintf out fmt xs))
-
-  (p "zipper: ~a\n" (if (gap? head) 'gap 'seg))
-  (p "guide: ~a\n" (guide-name guide))
-  (p "index: ~s\n\n" (guide-index guide))
-
-  (match head
-    [(gap left right)
-     (p "cursor-left:  ~s ^\n" (preview left #:side 'left))
-     (p "cursor-right: ^ ~s\n\n" (preview right #:side 'right))
-     (p "left-total-summary:  ~s\n"
-        (summary+ sys before (rope-summary left)))
-     (p "right-total-summary: ~s\n"
-        (summary+ sys (rope-summary right) after))]
-
-    [(seg left middle right)
-     (p "segment-left:   ~s\n" (preview left #:side 'left))
-     (p "segment-middle: ~s\n" (rope->string middle))
-     (p "segment-right:  ~s\n\n" (preview right #:side 'right))
-     (p "left-total-summary:  ~s\n"
-        (summary+ sys before (rope-summary left)))
-     (p "middle-summary:      ~s\n"
-        (rope-summary middle))
-     (p "right-total-summary: ~s\n"
-        (summary+ sys (rope-summary right) after))])
-
-  (p "\ncrumbs: ~a" (length crumbs)))
+  (match (zipper-head z)
+    [(gap _ _)
+     (define-values (l r) (gap-document-strings z))
+     (fprintf out "~a^~a" (clip l 'left) (clip r 'right))]
+    [(seg _ _ _)
+     (define-values (l m r) (seg-document-strings z))
+     (fprintf out "~a⟦~a⟧~a" (clip l 'left) m (clip r 'right))]))
