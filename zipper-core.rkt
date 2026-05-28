@@ -66,9 +66,9 @@
 ;; One guide struct. `type` ('gap or 'seg) selects the navigation strategy;
 ;; the navigator owns how to move, the guide only carries the decision. `decide`
 ;; returns the sign(s) the navigator searches on, reading summaries through
-;; `selector`. `make` rebuilds the guide from an updated index, so one movement
-;; operation can update an index that crosses the gap/seg boundary.
-(struct guide (type make decide selector index)
+;; `selector`. A move rebuilds the guide with `struct-copy` on `index`, which
+;; assumes the kind (type/decide) is fixed across indices.
+(struct guide (type decide selector index)
   #:transparent
   #:property prop:procedure
   (lambda (self l r)
@@ -264,9 +264,8 @@
 
 (define (move/update-index z update-index)
   (define old-guide (zipper-guide z))
-  (define old-index (guide-index old-guide))
-  (define new-index (update-index old-index))
-  (define new-guide ((guide-make old-guide) new-index))
+  (define new-index (update-index (guide-index old-guide)))
+  (define new-guide (struct-copy guide old-guide [index new-index]))
 
   (define z/target
     (struct-copy zipper z [guide new-guide]))
