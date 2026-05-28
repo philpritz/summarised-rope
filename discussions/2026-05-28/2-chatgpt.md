@@ -73,11 +73,43 @@ height(t) > C * log2(weight(t) + 1) + K
 So the active region self-repairs locally, while very bad subtrees are detected
 and rebuilt before shape debt becomes unbounded.
 
+## Local rebalancing mechanism
+
+The middle path should not be an exact split all the way to a target boundary.
+It should rough-borrow from the heavy side and stop once the local split is good
+enough.
+
+For a right-heavy node:
+
+```text
+[L [A B]] -> [[L A] B]
+```
+
+Keep borrowing across existing branch boundaries only while it improves local
+balance. Stop when the candidate passes a weight-ratio test, or when the next
+step would no longer improve the split enough.
+
+Good enough is a local constant-factor condition, not equality:
+
+```text
+max(weight(left), weight(right)) <= α * min(weight(left), weight(right)) + β
+```
+
+Use hysteresis if needed: a looser threshold for triggering repair and a tighter
+one for declaring the node clean, to avoid oscillation.
+
+This rough split may be expressible with guide-like machinery, but it should not
+be exposed as an ordinary seg guide. Seg guides are editor-facing selection
+search; balancing needs an internal borrow/search policy that happens to share
+summary-guided descent.
+
 ## Status
 
 Landed (concept): hybrid balancing policy — bounded local rotations during
-ordinary zipper movement, balanced construction for large batches, and full
-subtree rebuild when height/weight metadata detects pathological shape.
+ordinary zipper movement, balanced construction for large batches, full subtree
+rebuild when height/weight metadata detects pathological shape, and rough local
+borrowing that stops at a good-enough branch-boundary split.
 
-Open: exact `weight` definition, exact threshold constants, rotation budget per
-exposure, and whether rebuilds are synchronous or deferred for large subtrees.
+Open: exact `weight` definition, exact threshold constants, rotation/borrow
+budget per exposure, synchronous vs deferred rebuilds for large subtrees, and
+whether balancing borrow gets a distinct internal guide-like abstraction.
