@@ -41,6 +41,21 @@ Keep project discussions tight and user-led:
 - Avoid fluff.
 - Keep responses compact unless more detail is requested.
 
+## Proposals are exploratory by default
+
+When the user proposes an idea, it is opening a discussion, not a go-ahead to
+implement. The default is to explore it together and get a feel for it:
+
+- Discuss the shape, trade-offs, and alternatives first.
+- Trying code is welcome, but show it inline in chat as a sketch. Do not write
+  it into project files, commit, or push.
+- Stay in this exploratory mode, iterating, until the user explicitly signs off
+  on adding it.
+- Only after sign-off: make the change in the project, then commit/push per the
+  rules below.
+
+A proposal is an invitation to think together, not a task to rush to done.
+
 ## When to record
 
 Do not be eager to write discussion notes. Recording happens when the user
