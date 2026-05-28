@@ -65,7 +65,10 @@ only a draft artifact.
 
 ## Merging to master
 
-Work accumulates on the session's feature branch. Keep committing and pushing
-there throughout the session; merge into `master` only when the user explicitly
-asks for it. An upload request — "push to GitHub", "upload this", and the like —
-means push the current feature branch, not merge to master.
+Two distinct actions, not to be conflated:
+
+- **Push the feature branch.** Committing and pushing to the session's feature
+  branch is routine — it just syncs the branch to the remote. Plain "push" /
+  "upload to GitHub" requests mean this, and it is *not* a merge to master.
+- **Merge to master.** Only on an explicit instruction such as "merge to
+  master". Never fold the feature branch into `master` without it.
