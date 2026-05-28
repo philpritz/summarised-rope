@@ -9,10 +9,7 @@
  (struct-out seg)
  (struct-out opened-left)
  (struct-out opened-right)
- (struct-out gap-guide)
- (struct-out seg-guide)
- guide-index
- guide-maker
+ (struct-out guide)
  start
  move/update-index
  gap->seg
@@ -66,45 +63,19 @@
     (match-define (opened-right before sibling after) self)
     (values sibling subtree before after)))
 
-;; Two guide shapes. The predicates `gap-guide?` and `seg-guide?` are the
-;; guide-kind distinction. Each guide also carries `make`, a factory from an
-;; updated index to the appropriate guide for that index. That lets one public
-;; movement operation update an index that may cross gap/seg shape boundaries.
-(struct gap-guide (make decide selector read index)
+;; One guide struct. `type` ('gap or 'seg) selects the navigation strategy;
+;; the navigator owns how to move, the guide only carries the decision. `decide`
+;; returns the sign(s) the navigator searches on, reading summaries through
+;; `selector`. `make` rebuilds the guide from an updated index, so one movement
+;; operation can update an index that crosses the gap/seg boundary.
+(struct guide (type make decide selector index)
   #:transparent
   #:property prop:procedure
   (lambda (self l r)
-    ((gap-guide-decide self)
-     ((gap-guide-selector self) l)
-     ((gap-guide-selector self) r)
-     (gap-guide-index self))))
-
-(struct seg-guide (make decide selector read index)
-  #:transparent
-  #:property prop:procedure
-  (lambda (self l r)
-    ((seg-guide-decide self)
-     ((seg-guide-selector self) l)
-     ((seg-guide-selector self) r)
-     (seg-guide-index self))))
-
-(define (guide-index g)
-  (cond
-    [(gap-guide? g) (gap-guide-index g)]
-    [(seg-guide? g) (seg-guide-index g)]
-    [else
-     (raise-argument-error 'guide-index
-                           "gap-guide? or seg-guide?"
-                           g)]))
-
-(define (guide-maker g)
-  (cond
-    [(gap-guide? g) (gap-guide-make g)]
-    [(seg-guide? g) (seg-guide-make g)]
-    [else
-     (raise-argument-error 'guide-maker
-                           "gap-guide? or seg-guide?"
-                           g)]))
+    ((guide-decide self)
+     ((guide-selector self) l)
+     ((guide-selector self) r)
+     (guide-index self))))
 
 ;; ---------- shape transforms ----------
 
@@ -254,12 +225,12 @@
 ;; ---------- navigation ----------
 
 (define (navigate z g)
-  (cond
-    [(gap-guide? g) (navigate-gap z g)]
-    [(seg-guide? g) (navigate-seg z g)]
+  (case (and (guide? g) (guide-type g))
+    [(gap) (navigate-gap z g)]
+    [(seg) (navigate-seg z g)]
     [else
      (raise-argument-error 'navigate
-                           "gap-guide? or seg-guide?"
+                           "guide of type 'gap or 'seg"
                            g)]))
 
 (define (navigate-gap z g)
@@ -295,7 +266,7 @@
   (define old-guide (zipper-guide z))
   (define old-index (guide-index old-guide))
   (define new-index (update-index old-index))
-  (define new-guide ((guide-maker old-guide) new-index))
+  (define new-guide ((guide-make old-guide) new-index))
 
   (define z/target
     (struct-copy zipper z [guide new-guide]))
