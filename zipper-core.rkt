@@ -228,12 +228,13 @@
 
 ;; Navigate preserves the current head shape: a gap head moves to a gap, a seg
 ;; head to a seg. Shape changes are the job of the transform verbs, not of
-;; movement. The guide supplies both strategies; the head picks which. `on`
-;; projects both summaries through the selector, then applies the index-applied
-;; decide; `view` builds that 2-arg navigation function for the chosen decide.
+;; movement. The guide supplies both strategies; the head picks which. `view`
+;; builds the 2-arg navigation function for a chosen decide via `on` — project
+;; both summaries through the selector, then apply the index-applied decide.
 (define (navigate z g)
-  (define ((on h f) l r) (h (f l) (f r)))
-  (define (view decide) (on (decide (guide-index g)) (guide-selector g)))
+  (define (view decide)
+    (define ((on h f) l r) (h (f l) (f r)))
+    (on (decide (guide-index g)) (guide-selector g)))
   (match (zipper-head z)
     [(gap _ _)   (navigate-gap z (view (guide-gap-decide g)))]
     [(seg _ _ _) (navigate-seg z (view (guide-seg-decide g)))]
