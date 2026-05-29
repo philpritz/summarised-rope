@@ -3,8 +3,10 @@
 Pure design session on the **rope library's public surface** — recasting
 summaries, rope construction, and the split primitive as a small family of
 variadic polymorphic functions, and re-cutting the file boundaries between
-rope / summary / guide / zipper. **No code written to project files**; every
-snippet below is a **draft sketch**. Started from the original goal "replace
+rope / summary / guide / zipper. The sketches below were **subsequently
+implemented** — the rope library was rewritten in this style and merged to
+master (see *Status*); the zipper is left for a later session. Started from the
+original goal "replace
 crumbs using lenses," which reframed quickly (see *Crumbs-as-lens*) and then the
 session pivoted to settling the rope foundation the crumb/lens work sits on.
 
@@ -12,8 +14,9 @@ session pivoted to settling the rope foundation the crumb/lens work sits on.
 
 This explores a **heavier style of polymorphism than the user has typically
 used**: single functions taking *interleaved arguments of mixed types at
-variable arity*. Treat it as **trying the style out** — lock it in only if it
-actually proves clean in code. Nothing here is committed.
+variable arity*. It was treated as a trial — lock in only if it proves clean.
+**Outcome:** it proved out for the rope, which was rewritten this way and merged;
+the zipper is still to come.
 
 ## Summary as one variadic function
 
@@ -171,12 +174,32 @@ implemented.
 
 ## Status
 
-Pure design + **draft sketches only — nothing written to project files, nothing
-committed**. When promoted, affected files: `rope-core.rkt` (summary -> variadic
-fn, `rope` builder, `split`, node algebra-tagging, `rope->string`, new export
-list), `zipper-core.rkt` (crumbs -> `(side . sibling)`, navigation on `split`,
-summary calls -> the fn), and a **new `S`-specific module** (concrete algebra +
-guides pulled out of both).
+**Implemented and merged to master:** the rope library was rewritten in this
+style, replacing the old `rope-core.rkt`.
+
+### Implemented (`rope-core.rkt`)
+
+- `summary-algebra` -> one variadic `summary` fn (doubles as `sys`); nodes tagged
+  with their algebra; same-algebra `eq?` guard (cross-algebra -> error).
+- `rope` builder (chunks strings into leaves, dumb concat fold, re-fuses adjacent
+  ranges, drops empties); subsumes the old `string->rope` / `concat-rope`.
+- sys-free `split` (one-level eliminator), `split-rope`, `seg-split` — all
+  `before mr after`, guide curried first; `rope->string` as a leaf-walk.
+- Exports: `summary-algebra rope rope->string split split-rope seg-split`.
+- Inline rackunit suite — **26 tests passing** (`raco test rope-core.rkt`).
+- Old `rope-core.rkt` + `zipper-core.rkt` moved to `deprecated-3/` as reference.
+
+### Not done (later sessions)
+
+- **zipper** — untouched (in `deprecated-3/`); to be rewritten on the new rope
+  (crumb = `(side . sibling)`, rise = join). The new `S`-specific module
+  (concrete algebra + guides) also still to be carved out of both files.
+- `README.md` is now **stale** (documents the old zipper API / `string->rope`).
+- **Balancing** still deferred — `rope` folds into a right-leaning spine, so
+  fresh loads are O(n) until the 2026-05-28 batch-build lands in the fold seam.
+- **Empty selection (a = b)** is not a `seg-split` case — the ±1-offset machinery
+  has a 2-wide dead zone, so a zero-width window can't be expressed; a point
+  cursor is `split-rope`'s job.
 
 Open / parked:
 
