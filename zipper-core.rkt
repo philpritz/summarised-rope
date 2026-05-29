@@ -67,24 +67,10 @@
 ;; One guide carries both head strategies. `seg-decide` and `gap-decide` are
 ;; each curried index-first: `(decide index)` is a 2-arg function reading the
 ;; two selector-projected summaries and returning the search sign(s). `navigate`
-;; picks `as-seg` or `as-gap` by the head shape, so the same guide drives a seg
+;; picks the gap or seg decide by the head shape, so the same guide drives a seg
 ;; or a gap without changing instance; movement just swaps `index` by struct-copy
 ;; (the decide closures are index-independent, so no rebuild step is needed).
 (struct guide (gap-decide seg-decide selector index) #:transparent)
-
-;; Apply a guide as a gap / seg navigation function: curry in the current index,
-;; then feed the two selector-projected summaries. `as-gap` returns a sign
-;; (-1/0/1) for the point search; `as-seg` returns the centered value the seg
-;; splitter offsets by ±1.
-(define ((as-gap g) l r)
-  (((guide-gap-decide g) (guide-index g))
-   ((guide-selector g) l)
-   ((guide-selector g) r)))
-
-(define ((as-seg g) l r)
-  (((guide-seg-decide g) (guide-index g))
-   ((guide-selector g) l)
-   ((guide-selector g) r)))
 
 ;; Build a guide from a curried, index-first `seg-decide`. The gap defaults to
 ;; the segment's left edge via `left-boundary`; pass `#:gap-decide` (also curried
@@ -242,11 +228,15 @@
 
 ;; Navigate preserves the current head shape: a gap head moves to a gap, a seg
 ;; head to a seg. Shape changes are the job of the transform verbs, not of
-;; movement. The guide supplies both strategies; the head picks which.
+;; movement. The guide supplies both strategies; the head picks which. `on`
+;; projects both summaries through the selector, then applies the index-applied
+;; decide; `view` builds that 2-arg navigation function for the chosen decide.
 (define (navigate z g)
+  (define ((on h f) l r) (h (f l) (f r)))
+  (define (view decide) (on (decide (guide-index g)) (guide-selector g)))
   (match (zipper-head z)
-    [(gap _ _)   (navigate-gap z (as-gap g))]
-    [(seg _ _ _) (navigate-seg z (as-seg g))]
+    [(gap _ _)   (navigate-gap z (view (guide-gap-decide g)))]
+    [(seg _ _ _) (navigate-seg z (view (guide-seg-decide g)))]
     [_ (raise-argument-error 'navigate "zipper with a gap or seg head" z)]))
 
 (define (navigate-gap z g)
