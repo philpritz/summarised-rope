@@ -30,7 +30,9 @@
  split-rope
  split-whole-rope
  seg-split-rope
- seg-split-whole-rope)
+ seg-split-whole-rope
+ offset-edge
+ left-boundary)
 
 (struct summary-algebra (empty leaf append) #:transparent)
 
@@ -222,13 +224,24 @@
 (define ((split-whole-rope sys guide [select identity]) rope)
   ((split-rope sys guide select) rope (empty-summary sys) (empty-summary sys)))
 
+;; ---------- guide-function combinators ----------
+
+;; A seg guide returns a centered value; `offset-edge` shifts that value by `n`
+;; and re-signs it, so offsetting by -1 / +1 yields the seg's left / right cut.
+;; `left-boundary` names the -1 case: it projects a seg guide onto its left
+;; edge — the gap that sits at the segment's start. Both take an
+;; already-index-applied 2-arg function (two selector-projected summaries).
+(define ((offset-edge fn n) l r)
+  (sgn (+ (fn l r) n)))
+
+(define (left-boundary fn)
+  (offset-edge fn -1))
+
 (define ((seg-split-rope sys seg-guide [select identity]) rope before after)
-  (define ((boundary offset) selected-left selected-right)
-    (sgn (+ (seg-guide selected-left selected-right) offset)))
   (define-values (l rest)
-    ((split-rope sys (boundary -1) select) rope before after))
+    ((split-rope sys (offset-edge seg-guide -1) select) rope before after))
   (define-values (m r)
-    ((split-rope sys (boundary 1) select)
+    ((split-rope sys (offset-edge seg-guide 1) select)
      rest
      (summary+ sys before (rope-summary l))
      after))

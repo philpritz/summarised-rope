@@ -10,6 +10,7 @@
  (struct-out opened-left)
  (struct-out opened-right)
  (struct-out guide)
+ make-guide
  start
  move/update-index
  gap->seg
@@ -63,19 +64,34 @@
     (match-define (opened-right before sibling after) self)
     (values sibling subtree before after)))
 
-;; One guide struct. `type` ('gap or 'seg) selects the navigation strategy;
-;; the navigator owns how to move, the guide only carries the decision. `decide`
-;; returns the sign(s) the navigator searches on, reading summaries through
-;; `selector`. `make` rebuilds the guide from an updated index, so one movement
-;; operation can update an index that crosses the gap/seg boundary.
-(struct guide (type make decide selector index)
-  #:transparent
-  #:property prop:procedure
-  (lambda (self l r)
-    ((guide-decide self)
-     ((guide-selector self) l)
-     ((guide-selector self) r)
-     (guide-index self))))
+;; One guide carries both head strategies. `seg-decide` and `gap-decide` are
+;; each curried index-first: `(decide index)` is a 2-arg function reading the
+;; two selector-projected summaries and returning the search sign(s). `navigate`
+;; picks `as-seg` or `as-gap` by the head shape, so the same guide drives a seg
+;; or a gap without changing instance; movement just swaps `index` by struct-copy
+;; (the decide closures are index-independent, so no rebuild step is needed).
+(struct guide (gap-decide seg-decide selector index) #:transparent)
+
+;; Apply a guide as a gap / seg navigation function: curry in the current index,
+;; then feed the two selector-projected summaries. `as-gap` returns a sign
+;; (-1/0/1) for the point search; `as-seg` returns the centered value the seg
+;; splitter offsets by ±1.
+(define ((as-gap g) l r)
+  (((guide-gap-decide g) (guide-index g))
+   ((guide-selector g) l)
+   ((guide-selector g) r)))
+
+(define ((as-seg g) l r)
+  (((guide-seg-decide g) (guide-index g))
+   ((guide-selector g) l)
+   ((guide-selector g) r)))
+
+;; Build a guide from a curried, index-first `seg-decide`. The gap defaults to
+;; the segment's left edge via `left-boundary`; pass `#:gap-decide` (also curried
+;; index-first) to override with independent gap behaviour.
+(define (make-guide seg-decide selector index
+                    #:gap-decide [gap-decide (lambda (i) (left-boundary (seg-decide i)))])
+  (guide gap-decide seg-decide selector index))
 
 ;; ---------- shape transforms ----------
 
@@ -224,14 +240,14 @@
 
 ;; ---------- navigation ----------
 
+;; Navigate preserves the current head shape: a gap head moves to a gap, a seg
+;; head to a seg. Shape changes are the job of the transform verbs, not of
+;; movement. The guide supplies both strategies; the head picks which.
 (define (navigate z g)
-  (case (and (guide? g) (guide-type g))
-    [(gap) (navigate-gap z g)]
-    [(seg) (navigate-seg z g)]
-    [else
-     (raise-argument-error 'navigate
-                           "guide of type 'gap or 'seg"
-                           g)]))
+  (match (zipper-head z)
+    [(gap _ _)   (navigate-gap z (as-gap g))]
+    [(seg _ _ _) (navigate-seg z (as-seg g))]
+    [_ (raise-argument-error 'navigate "zipper with a gap or seg head" z)]))
 
 (define (navigate-gap z g)
   (define z0 (ensure-gap z))
@@ -264,9 +280,9 @@
 
 (define (move/update-index z update-index)
   (define old-guide (zipper-guide z))
-  (define old-index (guide-index old-guide))
-  (define new-index (update-index old-index))
-  (define new-guide ((guide-make old-guide) new-index))
+  (define new-guide
+    (struct-copy guide old-guide
+                 [index (update-index (guide-index old-guide))]))
 
   (define z/target
     (struct-copy zipper z [guide new-guide]))
