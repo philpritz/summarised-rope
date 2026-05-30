@@ -56,6 +56,45 @@ implement. The default is to explore it together and get a feel for it:
 
 A proposal is an invitation to think together, not a task to rush to done.
 
+## Questions are questions, not instructions
+
+When the user asks a question, answer the question. Do not infer a plan, a
+design decision, or a go-ahead from it.
+
+- A question like "do we need X?" or "is Y used anywhere?" is a request for
+  information, not a request to remove X or change Y. Answer what was asked and
+  surface the findings. (If instead the question probes a choice in your own
+  work — say code you drafted in chat — feel free to revise it if you wish.)
+- **Above all, do not close off design avenues on your own.** In these
+  discussions the user decides which possibilities to rule out; your job is to
+  keep them open — lay out options and trade-offs, don't prune them.
+- When unsure whether a question is also a request to act, ask before acting.
+
+This pairs with the exploratory-by-default rule above: both keep the work from
+racing ahead of the user's lead.
+
+## "Draft" means draft in chat
+
+When the user asks to *draft* something, produce it inline in chat — not in a
+project file. Drafting is collaborative: show the text, revise it together, and
+write it into a file (conventions, notes, code) only after the user signs off.
+
+- "draft X" / "show X" → show it in chat first; iterate until sign-off, then
+  write.
+- A direct instruction to add concrete content already in front of you ("put
+  this in …", "add this") is a go-ahead to write it straight away — no draft
+  round needed.
+- Sign-off must be explicit and affirmative ("write it", "add it"). A request to
+  *change* the draft is a new revision round, not approval — after applying the
+  edit, re-show the result and wait. When in doubt, stay in chat.
+- A tentative "maybe X" depends on state: while still drafting in chat it means
+  keep revising (never a write); once the content is already in the file, apply
+  it by default unless you think of a serious objection, in which case we'll
+  discuss. If the "maybe" carries a question ("…what do you think?"), that's
+  soliciting an opinion (see *Questions are questions*), don't apply.
+
+So drafting is the collaborative mode; an explicit "add this" is not.
+
 ## When to record
 
 Do not be eager to write discussion notes. Recording happens when the user
