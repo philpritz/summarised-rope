@@ -27,11 +27,24 @@
 (require racket/match)
 
 (provide
+ ;; rope core
  summariser
  roper
+ bisect
  splitter
  rope-splitter
- seg-splitter)
+ seg-splitter
+ ;; zipper
+ start
+ navigate
+ with-guide
+ to-root
+ edit-head
+ insert
+ delete
+ text
+ at-gap?
+ at-root?)
 
 ;; ---------- nodes ----------
 ;; Each node caches its summary value AND the summary fn it was built under.
@@ -140,6 +153,15 @@
   (values (make-leaf-range smr text start mid)
           (make-leaf-range smr text mid end)))
 
+;; Bisect a non-atomic rope into its two halves: a branch into its children, a
+;; leaf/leaf-range into two adjacent ranges over the same backing string (no
+;; copy). Precondition: (not (atom? r)). The single structural step shared by
+;; `splitter` and the zipper's `cut`.
+(define (bisect r)
+  (if (branch? r)
+      (values (branch-left r) (branch-right r))
+      (split-leaf-piece r)))
+
 ;; Two adjacent ranges of the same backing string re-fuse into one leaf.
 (define (leaf-compatible? l r)
   (and (leaf-range? l) (leaf-range? r)
@@ -209,10 +231,7 @@
 
 (define ((splitter guide on-l on-r on-here) before mr after)
   (define smr (rope-algebra mr))
-  (define-values (L R)
-    (if (branch? mr)
-        (values (branch-left mr) (branch-right mr))
-        (split-leaf-piece mr)))
+  (define-values (L R) (bisect mr))
   (case (guide (smr before L) (smr R after))
     [(-1) (on-l before L (smr R after) R)]
     [(1)  (on-r L (smr before L) R after)]
@@ -253,6 +272,137 @@
   (define-values (l rest) ((rope-splitter (bound -1)) before mr after))
   (define-values (m r)    ((rope-splitter (bound 1)) (smr before l) rest after))
   (values l m r))
+
+;; ============================================================================
+;; Zipper: structured navigation and editing over a rope.
+;;
+;; A focus is a `head` -- a sub-rope `t` plus the *summaries* of everything to
+;; its left (`before`) and right (`after`) in the document. Descent bisects the
+;; focus and steps into one half (or stops between the halves); the displaced
+;; sibling is stashed in a `crumb` -- a repair closure `head -> parent-head` --
+;; so rising is just pop-and-apply. No bespoke crumb datatype and no lens
+;; menagerie: every step is one bisection arranged three ways.
+;;
+;;   3-way split of t into (L, R) -- which slot the focus sits in:
+;;     go-left  = (empty, L, R)   focus L, R stashed right
+;;     go-right = (L, R, empty)   focus R, L stashed left
+;;     gap      = (L, empty, R)   focus nothing, sit between -- the cursor
+;;
+;; `roper`'s empty-drop rebuilds t identically from all three, so a gap (empty
+;; focus) and a segment (non-empty focus) need no separate treatment: an edit
+;; just swaps the focus rope and the repair stack rebuilds the document around it.
+
+(struct head (before rope after) #:transparent)
+(struct zipper (guide head crumbs) #:transparent)
+
+;; ---------- helpers (operate on unpacked head / crumbs) ----------
+
+;; step: focus on `m`, with `ls`/`rs` ropes stashed either side. Returns the new
+;; head -- anchors extended by the stashed summaries -- and the crumb that undoes
+;; it, rebuilding the parent focus as roper(ls, <focus>, rs) with parent anchors
+;; restored. Empty stashes vanish under roper, so this serves all three splits.
+(define (step smr b ls m rs a)
+  (values (head (smr b ls) m (smr rs a))
+          (lambda (h*) (head b ((roper smr) ls (head-rope h*) rs) a))))
+
+;; cut: one guided descent step on a non-atomic focus. Bisect once, read the
+;; guide at the L|R boundary, then either descend into a child (on-descend) or
+;; stop in the gap between them (on-stop). Precondition: (not (atom? (head-rope h))).
+;;   on-descend, on-stop : head crumb -> _
+(define ((cut guide) h on-descend on-stop)
+  (match-define (head b t a) h)
+  (define smr (rope-algebra t))
+  (define mt (empty-rope smr))
+  (define-values (L R) (bisect t))
+  (case (guide (smr b L) (smr R a))
+    [(-1) (call-with-values (lambda () (step smr b mt L R a)) on-descend)]
+    [(1)  (call-with-values (lambda () (step smr b L R mt a)) on-descend)]
+    [(0)  (call-with-values (lambda () (step smr b L mt R a)) on-stop)]
+    [else (error 'cut "guide must return -1, 0, or 1")]))
+
+;; descender: drive `cut` down until the guide stops in a gap, or the focus is
+;; atomic (a single element -- can't bisect, so the focus lands *on* it). Either
+;; way the resting focus is where an edit applies. Each descent pushes a crumb.
+(define ((descender guide) h crumbs)
+  (if (atom? (head-rope h))
+      (values h crumbs)
+      ((cut guide) h
+        (lambda (h* c) ((descender guide) h* (cons c crumbs)))
+        (lambda (h* c) (values h* (cons c crumbs))))))
+
+;; rise: pop one crumb and apply it, reconstructing the parent focus. Takes no
+;; guide -- the repair is purely structural.
+(define (rise h crumbs)
+  (values ((car crumbs) h) (cdr crumbs)))
+
+;; contains?: does the guide's target lie within this focus? Tested off the
+;; focus's own anchors -- the target is left of focus if the guide pushes left
+;; past the whole thing, right of focus if it pushes right past it. At a gap
+;; (empty t) both probes collapse to (zero? (guide before after)): the gap *is*
+;; the target spot.
+(define ((contains? guide) h)
+  (match-define (head b t a) h)
+  (define smr (rope-algebra t))
+  (and (not (negative? (guide b (smr t a))))
+       (not (positive? (guide (smr b t) a)))))
+
+;; ascender: rise until the focus contains the target (or we reach the root). A
+;; focus that already contains the target -- in particular a gap sitting on it --
+;; is left untouched, so re-navigating to the same spot is a no-op.
+(define ((ascender guide) h crumbs)
+  (cond
+    [(null? crumbs)        (values h crumbs)]
+    [((contains? guide) h) (values h crumbs)]
+    [else (let-values ([(h* c*) (rise h crumbs)])
+            ((ascender guide) h* c*))]))
+
+;; ---------- public ops (take/return a zipper; guide travels in its state) ----------
+
+;; start: a zipper rooted on the whole document, focus = the entire rope.
+(define ((start guide) rope)
+  (define smr (rope-algebra rope))
+  (zipper guide (head (smr "") rope (smr "")) '()))
+
+;; navigate: re-aim at the stored guide's target -- ascend until the focus
+;; contains it, then descend to the gap (or element) it points at.
+(define (navigate z)
+  (match-define (zipper guide h crumbs) z)
+  (let*-values ([(h1 c1) ((ascender guide) h crumbs)]
+                [(h2 c2) ((descender guide) h1 c1)])
+    (zipper guide h2 c2)))
+
+;; with-guide: swap the guide in place. Crumbs are guide-agnostic, so the next
+;; navigate simply re-ascends and re-descends under the new target.
+(define (with-guide z guide) (struct-copy zipper z [guide guide]))
+
+;; to-root: rise to the top, leaving the whole document as a single focus.
+(define (to-root z)
+  (match-define (zipper guide h crumbs) z)
+  (let loop ([h h] [crumbs crumbs])
+    (if (null? crumbs)
+        (zipper guide h crumbs)
+        (let-values ([(h* c*) (rise h crumbs)]) (loop h* c*)))))
+
+;; edit-head: replace the focus rope by (f focus); the repair stack rebuilds the
+;; document around it. f : rope -> (rope | string).
+(define (edit-head z f)
+  (match-define (zipper guide h crumbs) z)
+  (match-define (head b t a) h)
+  (define smr (rope-algebra t))
+  (zipper guide (head b ((roper smr) (f t)) a) crumbs))
+
+;; insert / delete in terms of edit-head. At a gap (empty focus) insert is a true
+;; insertion; on an element it replaces. delete empties the focus, which roper
+;; drops on rebuild, leaving a gap where the element was. (Whether insert should
+;; force a gap first rather than replace is left open -- see discussion notes.)
+(define (insert z content) (edit-head z (lambda (t) content)))
+(define (delete z)         (edit-head z (lambda (t) "")))
+
+;; text: the whole document as a string, via the root focus and the print protocol.
+(define (text z) (~a (head-rope (zipper-head (to-root z)))))
+
+(define (at-gap?  z) (empty-rope? (head-rope (zipper-head z))))
+(define (at-root? z) (null? (zipper-crumbs z)))
 
 ;; ============================================================================
 (module+ test
@@ -322,3 +472,60 @@
   ;; seg machinery has a 2-wide dead zone and cannot express a zero-width window;
   ;; a point cursor is rope-splitter's job, not seg-splitter's.
   )
+
+;; ---------- zipper ----------
+;; (Merged into the same `test` submodule, so a `let` keeps these names off the
+;; rope-core block's.)
+(module+ test
+  (let ()
+    (define sum (summariser string-length +))
+    ;; guide for "cursor after exactly k characters": 0 exactly at offset k.
+    (define ((at k) left right)
+      (cond [(> left k) -1] [(< left k) 1] [else 0]))
+
+    ;; --- start / text round-trip ---
+    (define z0 ((start (at 3)) ((roper sum) "abcdef")))
+    (check-equal? (text z0) "abcdef")
+    (check-true  (at-root? z0))
+
+    ;; --- navigate lands in the gap at an interior boundary; insert is a true insert ---
+    (define z3 (navigate z0))
+    (check-true (at-gap? z3))                          ; offset 3 is a bisection boundary
+    (check-equal? (text (insert z3 "XYZ")) "abcXYZdef")
+    (check-equal? (text z3) "abcdef")                  ; navigate/insert leave z3 unmutated
+
+    ;; --- navigate is text-preserving at every offset; to-root rebuilds exactly ---
+    (for ([k (in-range 0 7)])
+      (define zk (navigate ((start (at k)) ((roper sum) "abcdef"))))
+      (check-equal? (text zk) "abcdef")
+      (check-true  (at-root? (to-root zk))))
+
+    ;; --- at the extremes the guide drills to one element: the focus lands *on* it ---
+    (define zL (navigate ((start (at 0)) ((roper sum) "abcdef"))))
+    (check-false  (at-gap? zL))                         ; focused on the element "a"
+    (check-equal? (text (delete zL)) "bcdef")           ; delete removes it
+    (check-equal? (text (insert zL "Q")) "Qbcdef")      ; insert replaces it
+
+    (define zR (navigate ((start (at 6)) ((roper sum) "abcdef"))))
+    (check-equal? (text (delete zR)) "abcde")
+
+    ;; --- delete at a gap removes nothing (empty focus -> empty) ---
+    (check-equal? (text (delete z3)) "abcdef")
+
+    ;; --- re-aim with a new guide: ascend to root, descend to the new target ---
+    (define z5 (navigate (with-guide z3 (at 5))))
+    (check-true   (at-gap? z5))
+    (check-equal? (text (insert z5 "_")) "abcde_f")
+
+    ;; --- a chunked, multi-leaf rope navigates and edits the same way ---
+    (define hw ((roper sum #:chunk-size 2) "hello world"))
+    (for ([k (in-range 0 12)])
+      (check-equal? (text (navigate ((start (at k)) hw))) "hello world"))
+    (define zc (navigate ((start (at 5)) hw)))
+    (check-true   (at-gap? zc))
+    (check-equal? (text (insert zc ",")) "hello, world")
+
+    ;; --- empty document: the one position is a gap; insert seeds it ---
+    (define ze (navigate ((start (at 0)) ((roper sum) ""))))
+    (check-true   (at-gap? ze))
+    (check-equal? (text (insert ze "hi")) "hi")))
