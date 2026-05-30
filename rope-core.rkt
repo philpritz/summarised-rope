@@ -2,12 +2,14 @@
 
 ;; Summarised rope, variadic-polymorphic rewrite.
 ;;
-;; The whole library is organised around three variadic "coerce-and-fold"
-;; functions, one per carrier:
+;; Two variadic "coerce-and-fold" factories:
 ;;
 ;;   summary : (string | rope | summary)* -> summary    ; built by `summariser`
 ;;   roper   : (string | rope)*           -> rope        ; rope factory
-;;   rope->string                                        ; read a rope's text
+;;
+;; Ropes participate in Racket's display/write protocol (prop:custom-write),
+;; so (~a r), (format "~a" r), (display r) and (with-output-to-string ...)
+;; all yield / emit the rope's text. No bespoke rope->string in the public API.
 ;;
 ;; A summary function is built by `summariser` and is the single handle threaded
 ;; into rope construction (what older versions called `sys`). Threaded summary
@@ -27,7 +29,6 @@
 (provide
  summariser
  roper
- rope->string
  splitter
  rope-splitter
  seg-splitter)
@@ -36,9 +37,20 @@
 ;; Each node caches its summary value AND the summary fn it was built under.
 ;; `rope-summary` reads the cached value; `rope-algebra` reads the fn.
 
-(struct leaf       (text summary algebra)            #:transparent)
-(struct leaf-range (text start end summary algebra)  #:transparent)
-(struct branch     (left right summary algebra)      #:transparent)
+(struct leaf (text summary algebra)
+  #:transparent
+  #:property prop:custom-write
+  (lambda (r port mode) (rope-write-text r port)))
+
+(struct leaf-range (text start end summary algebra)
+  #:transparent
+  #:property prop:custom-write
+  (lambda (r port mode) (rope-write-text r port)))
+
+(struct branch (left right summary algebra)
+  #:transparent
+  #:property prop:custom-write
+  (lambda (r port mode) (rope-write-text r port)))
 
 (define (rope? v) (or (leaf? v) (leaf-range? v) (branch? v)))
 
@@ -170,12 +182,18 @@
   (apply (concat-rope smr) (map ->rope parts)))
 
 ;; ---------- read ----------
+;; Internal walk used by the prop:custom-write handler on each node type.
+;; Writes leaf bytes straight to the port; leaf-range avoids substring's copy by
+;; passing its bounds to write-string. (~a r), (format "~a" r), (display r), and
+;; (with-output-to-string (lambda () (display r))) all route through this.
 
-(define (rope->string r)
+(define (rope-write-text r port)
   (match r
-    [(leaf text _ _)           text]
-    [(leaf-range text s e _ _) (substring text s e)]
-    [(branch l r _ _)          (string-append (rope->string l) (rope->string r))]))
+    [(leaf text _ _)           (write-string text port)]
+    [(leaf-range text s e _ _) (write-string text port s e)]
+    [(branch l r _ _)
+     (rope-write-text l port)
+     (rope-write-text r port)]))
 
 ;; ---------- splitter: one-level guided eliminator ----------
 ;; Precondition: (not (atom? mr)). Does exactly one structural level: derive the
@@ -245,12 +263,12 @@
 
   ;; --- build & read ---
   (define r ((roper sum) "abcdef"))
-  (check-equal? (rope->string r) "abcdef")
+  (check-equal? (~a r) "abcdef")
   (check-equal? (sum r) 6)                         ; rope coerced -> cached summary
 
   ;; chunked build still round-trips and summarises
   (define r2 ((roper sum #:chunk-size 2) "hello world"))
-  (check-equal? (rope->string r2) "hello world")
+  (check-equal? (~a r2) "hello world")
   (check-equal? (sum r2) 11)
 
   ;; --- interleaving strings / ropes / summaries ---
@@ -260,7 +278,7 @@
 
   ;; assembling mixed parts into a rope
   (define joined ((roper sum) "(" r ")"))
-  (check-equal? (rope->string joined) "(abcdef)")
+  (check-equal? (~a joined) "(abcdef)")
   (check-equal? (sum joined) 8)
 
   ;; --- same-summary guard ---
@@ -272,34 +290,34 @@
     (cond [(> left k) -1] [(< left k) 1] [else 0]))
   (define e (sum ""))
   (let-values ([(l rr) ((rope-splitter (at 3)) e r e)])
-    (check-equal? (rope->string l)  "abc")
-    (check-equal? (rope->string rr) "def"))
+    (check-equal? (~a l)  "abc")
+    (check-equal? (~a rr) "def"))
   (let-values ([(l rr) ((rope-splitter (at 2)) e r e)])
-    (check-equal? (rope->string l)  "ab")
-    (check-equal? (rope->string rr) "cdef"))
+    (check-equal? (~a l)  "ab")
+    (check-equal? (~a rr) "cdef"))
   (let-values ([(l rr) ((rope-splitter (at 0)) e r e)])
-    (check-equal? (rope->string l)  "")
-    (check-equal? (rope->string rr) "abcdef"))
+    (check-equal? (~a l)  "")
+    (check-equal? (~a rr) "abcdef"))
   (let-values ([(l rr) ((rope-splitter (at 6)) e r e)])
-    (check-equal? (rope->string l)  "abcdef")
-    (check-equal? (rope->string rr) ""))
+    (check-equal? (~a l)  "abcdef")
+    (check-equal? (~a rr) ""))
 
   ;; split on a chunked (multi-leaf) rope
   (let-values ([(l rr) ((rope-splitter (at 5)) e r2 e)])
-    (check-equal? (rope->string l)  "hello")
-    (check-equal? (rope->string rr) " world"))
+    (check-equal? (~a l)  "hello")
+    (check-equal? (~a rr) " world"))
 
   ;; --- seg-splitter: select window [a, b) by character position ---
   ;; seg-guide returns sgn(a-left) + sgn(b-left); (bound -1)/(bound +1) cut at a/b.
   (define ((seg a b) left right) (+ (sgn (- a left)) (sgn (- b left))))
   (let-values ([(l m rr) ((seg-splitter (seg 2 5)) e r e)])
-    (check-equal? (rope->string l)  "ab")
-    (check-equal? (rope->string m)  "cde")
-    (check-equal? (rope->string rr) "f"))
+    (check-equal? (~a l)  "ab")
+    (check-equal? (~a m)  "cde")
+    (check-equal? (~a rr) "f"))
   (let-values ([(l m rr) ((seg-splitter (seg 0 6)) e r e)])  ; whole thing
-    (check-equal? (rope->string l)  "")
-    (check-equal? (rope->string m)  "abcdef")
-    (check-equal? (rope->string rr) ""))
+    (check-equal? (~a l)  "")
+    (check-equal? (~a m)  "abcdef")
+    (check-equal? (~a rr) ""))
   ;; Note: an *empty* selection (a = b) is a gap, not a segment. The ±1-offset
   ;; seg machinery has a 2-wide dead zone and cannot express a zero-width window;
   ;; a point cursor is rope-splitter's job, not seg-splitter's.
