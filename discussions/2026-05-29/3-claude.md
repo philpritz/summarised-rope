@@ -13,18 +13,17 @@ The ~20-function old zipper surface collapses to:
 ```
 start     rope -> cursor
 navigate  cursor guide -> cursor       ; move + select + reshape
-insert    cursor content -> cursor     ; edit  (subsumes replace)
-delete    cursor -> cursor             ; edit  (= insert empty)
+insert    cursor content -> cursor     ; edit
+delete    cursor -> cursor             ; edit
 view      cursor window-guide -> text  ; windowed read
 text      cursor -> string             ; whole-doc / selection read
 ```
 
 `get`/`put` are internal mechanism, not exposed — keeping them private is what
 protects the anchor invariant (a public `put` could move the anchors or install
-a malformed head). `replace` folds into `insert` because `edit = set-the-middle`
-covers both (typing with a selection = replace; typing at a point = insert).
-`delete = insert empty`. `move/update-index` dissolves because the guide is now
-an argument to `navigate`, not stored on the cursor.
+a malformed head). `move/update-index` dissolves because the guide is now an
+argument to `navigate`, not stored on the cursor. (Whether `insert` / `delete` /
+`replace` share one underlying op is left open — see *Editing*.)
 
 ## Navigate decomposes to three structural verbs
 
@@ -55,24 +54,34 @@ The old `open-split-*`, `open-seg-*`, `open-straddling` all collapse into
 `open-left`/`open-right` (which cracked rope nodes by hand) disappear — that's
 exactly what `splitter` / `rope-splitter` now expose.
 
-## Editing reduces to one mechanism
+## Editing
 
-Taking **gap ≡ seg with empty middle** (the 2026-05-28 anchor contract) as
-central:
+Editing is a head→head transform applied in place — `edit-head : (head -> head)
+-> zipper` — leaving the crumb/lens stack untouched. The anchor contract makes
+it safe: a transform that leaves `before`/`after` fixed cannot drift the cursor.
 
-```
-edit-head  : (head -> head) -> zipper   ; in-place: set the middle, anchors fixed
+**Abandoned: gap as a degenerate seg.** The 2026-05-28 note (`1-claude.md`) took
+"a gap is a seg with an empty middle" — `(gap l r) ≡ (seg l ∅ r)` — as central.
+**This session decides against this implementation.** Gap and seg are now
+distinct head arities: a gap is a 2-piece head `(l r)`, a seg a 3-piece head
+`(l m r)`.
+The variadic head lets the two shapes simply *be* different arities (k=2, k=3);
+a gap does **not** carry an empty middle slot. The degenerate-seg view survives
+only as a conceptual analogy.
 
-insert  z content   = edit-head replacing middle with content
-delete  z           = edit-head replacing middle with ∅   (= insert empty)
-```
+What the old model bought, now reconsidered: it made `insert`/`delete` two
+spellings of one "set the middle" op. With distinct arities they are arity
+changes (gap↔seg), so whether they share a single underlying mechanism is
+**reopened, left open here**. The old `delete = insert empty` equivalence went
+with the abandoned model and is dropped.
 
-- Generalized `gap->seg` / `seg->gap` HOFs are **dead**: every call site feeds a
-  trivial callback that never re-splits `l` or `r`. Drop both.
+- Generalized `gap->seg` / `seg->gap` HOFs are **dead**: every old call site
+  feeds a trivial callback that never re-splits `l` or `r`. Drop both.
 - `left-bound-gap` / `right-bound-gap` aren't edits — they're cursor reshapes
-  (collapse selection to one edge). They fold into `navigate`, no separate verb.
-- Anchors-fixed *is* the safety contract: editing the middle leaves
-  before/after summaries untouched, so the cursor doesn't drift.
+  (collapse a selection to one edge). They fold into `navigate`, no separate
+  verb.
+- Anchors-fixed *is* the safety contract: a transform leaving before/after
+  untouched can't drift the cursor.
 
 ## The splitter family generalizes — and goes variadic+continuation
 
@@ -233,6 +242,9 @@ In `discussions/conventions.md`:
 - **`smr` recovery** — how zipper ops get the summary fn back when combining
   summaries. Three options still in play: expose `rope-algebra`, carry `smr`
   as a zipper field, or pass as an argument.
+- **`insert` / `delete` / `replace` mechanism** — reopened by deciding against
+  gap-as-degenerate-seg; whether they share one underlying op or are separate
+  arity-changing head transforms is unsettled.
 - **The narrow algorithm** — per-level piece-selection turning a guide into a
   specific lens.
 - **Lens constructors** — `lens-by-guide`, `lens-pick-piece`, etc.
