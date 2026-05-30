@@ -128,3 +128,20 @@ Two distinct actions, not to be conflated:
   "merge" or "master" — e.g. "merge to master", "push to master", "merge this".
   Plain "push" / "upload" never triggers it; without one of those words, the
   feature branch is never folded into `master`.
+
+## Amendments inherit the last destination
+
+A follow-up amendment is handled the same way as the most recent comparable
+action, without the user restating how. The disposition changes only when the
+user redirects.
+
+- If the last change was **pushed to master**, subsequent amendments are also
+  committed and pushed to master — no need to re-ask.
+- If the last change was **pushed to a feature branch**, subsequent amendments
+  go to that same branch.
+- If the current mode is **drafting in chat**, follow-up tweaks are likewise
+  drafted in chat (still subject to explicit sign-off before they land).
+
+This refines *Merging to master*: the word "merge"/"master" is still needed to
+first send work to master, but amendments to the same work then stay there by
+default.
