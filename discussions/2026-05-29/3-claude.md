@@ -1,4 +1,4 @@
-# Discussion — 2026-05-30 (1) — with Claude
+# Discussion — 2026-05-29 (3) — with Claude
 
 Planning session for the zipper rework on top of the variadic rope (continuing
 `2026-05-29/2-claude.md`). Pure design for the zipper layer plus a round of
