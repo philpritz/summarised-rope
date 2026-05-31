@@ -26,6 +26,9 @@
          "rope-core.rkt")
 
 (provide
+ nav
+ gap-mode
+ seg-mode
  start
  navigate
  select-seg
@@ -40,6 +43,17 @@
 
 (struct head (before rope after) #:transparent)
 (struct zipper (guide head crumbs) #:transparent)
+
+;; The zipper's "guide" slot holds a `nav`: a two-mode switch over a point guide
+;; (gap -- drives `descender`) and a span guide (seg -- drives `carve`). The live
+;; `mode` says which one navigates; edits flip it -- delete -> gap (collapsed to a
+;; point), insert -> seg (a span).
+(struct nav (gap seg mode) #:transparent)   ; mode is 'gap or 'seg
+
+(define (to-gap n) (struct-copy nav n [mode 'gap]))
+(define (to-seg n) (struct-copy nav n [mode 'seg]))
+(define (gap-mode z) (struct-copy zipper z [guide (to-gap (zipper-guide z))]))
+(define (seg-mode z) (struct-copy zipper z [guide (to-seg (zipper-guide z))]))
 
 ;; ---------- helpers (operate on unpacked head / crumbs) ----------
 
@@ -138,22 +152,36 @@
 
 ;; ---------- public ops (take/return a zipper; guide travels in its state) ----------
 
-;; start: a zipper rooted on the whole document, focus = the entire rope.
-(define ((start guide) rope)
+;; start: a zipper rooted on the whole document, focus = the entire rope. Takes a
+;; `nav`; a bare guide is shorthand for a gap-mode nav (no seg guide).
+(define ((start g) rope)
+  (define n (if (nav? g) g (nav g #f 'gap)))
   (define smr (rope-algebra rope))
-  (zipper guide (head (smr "") rope (smr "")) '()))
+  (zipper n (head (smr "") rope (smr "")) '()))
 
-;; navigate: re-aim at the stored guide's target -- ascend until the focus
-;; contains it, then descend to the gap (or element) it points at.
+;; navigate: re-aim at the live mode's target. gap mode -- ascend until the focus
+;; contains the point, then descend to it. seg mode -- carve the span out of the
+;; whole document. The nav is carried through unchanged.
 (define (navigate z)
-  (match-define (zipper guide h crumbs) z)
-  (let*-values ([(h1 c1) ((ascender guide) h crumbs)]
-                [(h2 c2) ((descender guide) h1 c1)])
-    (zipper guide h2 c2)))
+  (match-define (zipper n h crumbs) z)
+  (case (nav-mode n)
+    [(gap)
+     (let*-values ([(h1 c1) ((ascender (nav-gap n)) h crumbs)]
+                   [(h2 c2) ((descender (nav-gap n)) h1 c1)])
+       (zipper n h2 c2))]
+    [(seg)
+     (match-define (zipper _ rh rc) (to-root z))
+     (match-define (head b t a) rh)
+     (define smr (rope-algebra t))
+     (define-values (l m r) ((carve (nav-seg n)) b t a))
+     (let-values ([(h* put) (arrange smr b l m r a)])
+       (zipper n h* (cons put rc)))]
+    [else (error 'navigate "nav mode must be 'gap or 'seg")]))
 
-;; with-guide: swap the guide in place. Crumbs are guide-agnostic, so the next
-;; navigate simply re-ascends and re-descends under the new target.
-(define (with-guide z guide) (struct-copy zipper z [guide guide]))
+;; with-guide: replace the point (gap) guide in place. Crumbs are guide-agnostic,
+;; so the next gap-mode navigate re-ascends and re-descends under the new target.
+(define (with-guide z g)
+  (struct-copy zipper z [guide (struct-copy nav (zipper-guide z) [gap g])]))
 
 ;; to-root: rise to the top, leaving the whole document as a single focus.
 (define (to-root z)
@@ -171,12 +199,13 @@
   (define smr (rope-algebra t))
   (zipper guide (head b ((roper smr) (f t)) a) crumbs))
 
-;; insert / delete in terms of edit-head. At a gap (empty focus) insert is a true
-;; insertion; on an element it replaces. delete empties the focus, which roper
-;; drops on rebuild, leaving a gap where the element was. (Whether insert should
-;; force a gap first rather than replace is left open -- see discussion notes.)
-(define (insert z content) (edit-head z (lambda (t) content)))
-(define (delete z)         (edit-head z (lambda (t) "")))
+;; insert / delete: edit the focus, then flip the mode to match what it now is.
+;; insert puts content in -- the result is a span -> seg mode (the inserted text
+;; is the selection). delete empties the focus (roper drops it on rebuild) -> gap
+;; mode (a point where the edit was). The switch keeps the focus and the live
+;; guide in harmony without re-navigating.
+(define (insert z content) (seg-mode (edit-head z (lambda (t) content))))
+(define (delete z)         (gap-mode (edit-head z (lambda (t) ""))))
 
 ;; select-seg: focus the seg-guide's segment as the head's middle, stashing the
 ;; left/right context into one crumb. carve at the current focus, then arrange the
@@ -275,3 +304,49 @@
     (check-false  (at-gap? zs))                 ; focus is the span "cde"
     (check-equal? (text (delete zs)) "abf")     ; delete removes the span
     (check-equal? (text (insert zs "X")) "abXf")))
+
+;; ============================================================================
+;; A runnable example: `racket zipper-core.rkt`. A char-count summary, a point
+;; (gap) guide "at offset k", and a span (seg) guide "window [a, b)". The cursor
+;; is shown inline -- | marks a gap, [..] a selected segment.
+(module+ main
+  (define sum (summariser string-length +))
+  (define ((at k)       l r) (cond [(> l k) -1] [(< l k) 1] [else 0]))   ; point at k
+  (define ((window a b) l r) (+ (sgn (- a l)) (sgn (- b l))))            ; span [a, b)
+
+  (define (show tag z)
+    (define h     (zipper-head z))
+    (define off   (head-before h))         ; chars to the left of the focus
+    (define foc   (~a (head-rope h)))
+    (define whole (text z))
+    (printf "~a~a\n"
+            (~a tag #:min-width 20)
+            (if (at-gap? z)
+                (string-append (substring whole 0 off) "|" (substring whole off))
+                (string-append (substring whole 0 off) "[" foc "]"
+                               (substring whole (+ off (string-length foc)))))))
+
+  (define doc ((roper sum) "hello world"))
+  (define z0 ((start (nav (at 6) (window 0 5) 'gap)) doc))
+  (show "start (whole doc):" z0)
+
+  (define z1 (navigate z0))                ; gap mode: descend to the point at 6
+  (show "navigate to 6:" z1)
+
+  (define z2 (insert z1 "brave "))         ; insert -> seg mode, inserted span selected
+  (show "insert \"brave \":" z2)
+
+  (define z3 (delete z2))                  ; delete the selection -> gap mode
+  (show "delete:" z3)
+
+  (define z4 (navigate (seg-mode z3)))     ; seg mode: select the window [0, 5)
+  (show "select [0,5):" z4)
+
+  (define z5 (delete z4))                  ; delete the selection
+  (show "delete selection:" z5)
+
+  (define z6 (insert z5 "HEY"))            ; insert at the gap -> selected
+  (show "insert \"HEY\":" z6)
+
+  (define z7 (navigate (with-guide (gap-mode z6) (at 3))))  ; back to a point at 3
+  (show "navigate to 3:" z7))
