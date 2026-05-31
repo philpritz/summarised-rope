@@ -238,6 +238,11 @@
        (zipper n h* (cons put rc)))]
     [else (error 'navigate "nav mode must be 'gap or 'seg")]))
 
+;; realign: re-navigate to repair the focus/guide invariant after an edit -- the
+;; cursor re-materialises against the live guide on the edited rope. Same step as
+;; navigate; named for intent at the edit sites.
+(define realign navigate)
+
 ;; to-root: rise to the top, leaving the whole document as a single focus.
 (define (to-root z)
   (match-define (zipper guide h crumbs) z)
@@ -254,13 +259,13 @@
   (define smr (rope-algebra t))
   (zipper guide (head b ((roper smr) (f t)) a) crumbs))
 
-;; insert / delete: edit the focus, flip the mode, then RE-NAVIGATE (reharmonise)
-;; so the cursor re-materialises against the live guide on the edited rope.
-;; insert -> seg mode, so it re-selects the unit the insert landed in (e.g. with a
-;; symbol guide, typing into a symbol re-selects the whole symbol). delete -> gap
-;; mode, collapsing to the point where the edit was.
-(define (insert z content) (navigate (seg-mode (edit-head z (lambda (t) content)))))
-(define (delete z)         (navigate (gap-mode (edit-head z (lambda (t) "")))))
+;; insert / delete: edit the focus, flip the mode, then `realign` so the cursor
+;; re-materialises against the live guide on the edited rope. insert -> seg mode,
+;; so it re-selects the unit the insert landed in (e.g. with a symbol guide,
+;; typing into a symbol re-selects the whole symbol). delete -> gap mode,
+;; collapsing to the point where the edit was.
+(define (insert z content) (realign (seg-mode (edit-head z (lambda (t) content)))))
+(define (delete z)         (realign (gap-mode (edit-head z (lambda (t) "")))))
 
 ;; select-seg: focus the seg-guide's segment as the head's middle, stashing the
 ;; left/right context into one crumb. carve at the current focus, then arrange the
