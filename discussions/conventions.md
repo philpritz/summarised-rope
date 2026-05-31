@@ -163,3 +163,21 @@ correct it before relying on it.
 
 Unlike a bare question (see *Questions are questions*), a premise is something
 to verify and act on — just conditioned on its being true.
+
+## One branch per session
+
+A session's pushed work goes on a single feature branch by default, not a fresh
+branch per sub-task. The session's first push creates it
+(`claude/<date>/<topic>`); everything after lands on that same branch —
+including changes that feel separate, like a conventions tweak made alongside
+code.
+
+Don't open a second branch for a side change mid-session. If a change genuinely
+belongs on its own branch, the user will say so; the default is together.
+
+Pairs with *Amendments inherit the last destination*.
+
+## When a convention is ambiguous
+
+Feel free to ask when it's genuinely unclear which convention applies, or how to
+apply it.
