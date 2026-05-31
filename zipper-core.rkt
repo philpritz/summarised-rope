@@ -26,34 +26,47 @@
          "rope-core.rkt")
 
 (provide
- nav
- gap-mode
- seg-mode
- start
- navigate
- select-seg
- with-guide
- to-root
- edit-head
- insert
- delete
- text
- at-gap?
- at-root?)
+ ;; nav + guide construction
+ nav axis point span
+ ;; mode / index / guide edits
+ gap-mode seg-mode with-index move with-guides
+ ;; ops
+ start navigate select-seg to-root edit-head insert delete text at-gap? at-root?)
 
 (struct head (before rope after) #:transparent)
 (struct zipper (guide head crumbs) #:transparent)
 
-;; The zipper's "guide" slot holds a `nav`: a two-mode switch over a point guide
-;; (gap -- drives `descender`) and a span guide (seg -- drives `carve`). The live
-;; `mode` says which one navigates; edits flip it -- delete -> gap (collapsed to a
-;; point), insert -> seg (a span).
-(struct nav (gap seg mode) #:transparent)   ; mode is 'gap or 'seg
+;; The zipper's slot holds a `nav`: index-first deciders for the two modes, a
+;; *shared* index, and the live mode. `gap`/`seg` are deciders -- index -> guide
+;; -- so both modes read the one index; their alignment is in their bodies. The
+;; live guide is the decider applied to the index. Edits flip the mode: delete ->
+;; gap (collapsed to a point), insert -> seg (a span).
+(struct nav (gap seg index mode) #:transparent)   ; gap, seg : index -> guide
+(define (live-gap n) ((nav-gap n) (nav-index n)))
+(define (live-seg n) ((nav-seg n) (nav-index n)))
 
+;; Guide construction: deciders over a summary projection `field` (summary ->
+;; number). They share the index -- the gap is the boundary where `field` of the
+;; left context reaches the index; the seg selects the unit [index, index+1) in
+;; `field`'s units (so the gap is the seg's left edge -- that is their alignment).
+(define ((point field) i)
+  (lambda (l r) (define x (field l)) (cond [(> x i) -1] [(< x i) 1] [else 0])))
+(define ((span field) i)
+  (lambda (l r) (define x (field l)) (+ (sgn (- i x)) (sgn (- (add1 i) x)))))
+;; axis: a nav along one summary dimension -- both deciders from one projection.
+(define (axis field i mode) (nav (point field) (span field) i mode))
+
+;; Editing the nav (plain struct-copy -- no lens library): flip the mode, set or
+;; move the shared index, or replace the deciders (re-aim onto another dimension).
+(define (edit-nav z f) (struct-copy zipper z [guide (f (zipper-guide z))]))
 (define (to-gap n) (struct-copy nav n [mode 'gap]))
 (define (to-seg n) (struct-copy nav n [mode 'seg]))
-(define (gap-mode z) (struct-copy zipper z [guide (to-gap (zipper-guide z))]))
-(define (seg-mode z) (struct-copy zipper z [guide (to-seg (zipper-guide z))]))
+(define (gap-mode z) (edit-nav z to-gap))
+(define (seg-mode z) (edit-nav z to-seg))
+(define (with-index z i) (edit-nav z (lambda (n) (struct-copy nav n [index i]))))
+(define (move z f)       (edit-nav z (lambda (n) (struct-copy nav n [index (f (nav-index n))]))))
+(define (with-guides z gap seg)
+  (edit-nav z (lambda (n) (struct-copy nav n [gap gap] [seg seg]))))
 
 ;; ---------- helpers (operate on unpacked head / crumbs) ----------
 
@@ -168,35 +181,29 @@
 ;; ---------- public ops (take/return a zipper; guide travels in its state) ----------
 
 ;; start: a zipper rooted on the whole document, focus = the entire rope. Takes a
-;; `nav`; a bare guide is shorthand for a gap-mode nav (no seg guide).
-(define ((start g) rope)
-  (define n (if (nav? g) g (nav g #f 'gap)))
+;; `nav` -- e.g. (axis field index mode).
+(define ((start n) rope)
   (define smr (rope-algebra rope))
   (zipper n (head (smr "") rope (smr "")) '()))
 
-;; navigate: re-aim at the live mode's target. gap mode -- ascend until the focus
-;; contains the point, then descend to it. seg mode -- carve the span out of the
-;; whole document. The nav is carried through unchanged.
+;; navigate: re-aim at the live mode's target -- the decider applied to the shared
+;; index. gap mode: ascend until the focus contains the point, then descend to it.
+;; seg mode: carve the span out of the whole document. The nav rides through.
 (define (navigate z)
   (match-define (zipper n h crumbs) z)
   (case (nav-mode n)
     [(gap)
-     (let*-values ([(h1 c1) ((ascender (nav-gap n)) h crumbs)]
-                   [(h2 c2) ((descender (nav-gap n)) h1 c1)])
+     (let*-values ([(h1 c1) ((ascender (live-gap n)) h crumbs)]
+                   [(h2 c2) ((descender (live-gap n)) h1 c1)])
        (zipper n h2 c2))]
     [(seg)
      (match-define (zipper _ rh rc) (to-root z))
      (match-define (head b t a) rh)
      (define smr (rope-algebra t))
-     (define-values (l m r) ((carve (nav-seg n)) b t a))
+     (define-values (l m r) ((carve (live-seg n)) b t a))
      (let-values ([(h* put) (arrange smr b l m r a)])
        (zipper n h* (cons put rc)))]
     [else (error 'navigate "nav mode must be 'gap or 'seg")]))
-
-;; with-guide: replace the point (gap) guide in place. Crumbs are guide-agnostic,
-;; so the next gap-mode navigate re-ascends and re-descends under the new target.
-(define (with-guide z g)
-  (struct-copy zipper z [guide (struct-copy nav (zipper-guide z) [gap g])]))
 
 ;; to-root: rise to the top, leaving the whole document as a single focus.
 (define (to-root z)
@@ -245,12 +252,12 @@
   (require rackunit)
   (let ()
     (define sum (summariser string-length +))
-    ;; guide for "cursor after exactly k characters": 0 exactly at offset k.
-    (define ((at k) left right)
-      (cond [(> left k) -1] [(< left k) 1] [else 0]))
+    (define (off s) s)                                       ; char-count projection
+    (define (g i [m 'gap]) (axis off i m))                   ; a char nav at index i
+    (define ((win a b) l r) (+ (sgn (- a l)) (sgn (- b l)))) ; raw window guide [a, b)
 
     ;; --- start / text round-trip ---
-    (define z0 ((start (at 3)) ((roper sum) "abcdef")))
+    (define z0 ((start (g 3)) ((roper sum) "abcdef")))
     (check-equal? (text z0) "abcdef")
     (check-true  (at-root? z0))
 
@@ -262,112 +269,118 @@
 
     ;; --- navigate is text-preserving at every offset; to-root rebuilds exactly ---
     (for ([k (in-range 0 7)])
-      (define zk (navigate ((start (at k)) ((roper sum) "abcdef"))))
+      (define zk (navigate ((start (g k)) ((roper sum) "abcdef"))))
       (check-equal? (text zk) "abcdef")
       (check-true  (at-root? (to-root zk))))
 
     ;; --- gap mode always lands in a gap, even at the extremes (atom->gap) ---
-    (define zL (navigate ((start (at 0)) ((roper sum) "abcdef"))))
+    (define zL (navigate ((start (g 0)) ((roper sum) "abcdef"))))
     (check-true  (at-gap? zL))                          ; a gap *before* "a", not on it
     (check-equal? (text (insert zL "Q")) "Qabcdef")     ; insert at the gap
     (check-equal? (text (delete zL)) "abcdef")          ; delete at a gap is a no-op
 
-    (define zR (navigate ((start (at 6)) ((roper sum) "abcdef"))))
+    (define zR (navigate ((start (g 6)) ((roper sum) "abcdef"))))
     (check-true  (at-gap? zR))                          ; a gap *after* "f"
     (check-equal? (text (insert zR "Z")) "abcdefZ")
 
     ;; --- delete at a gap removes nothing (empty focus -> empty) ---
     (check-equal? (text (delete z3)) "abcdef")
 
-    ;; --- re-aim with a new guide: ascend to root, descend to the new target ---
-    (define z5 (navigate (with-guide z3 (at 5))))
+    ;; --- edit the shared index: set it (with-index) or move it (move) ---
+    (define z5 (navigate (with-index z3 5)))
     (check-true   (at-gap? z5))
     (check-equal? (text (insert z5 "_")) "abcde_f")
+    (check-equal? (text (insert (navigate (move z3 add1)) "*")) "abcd*ef")  ; 3 -> 4
 
     ;; --- a chunked, multi-leaf rope navigates and edits the same way ---
     (define hw ((roper sum #:chunk-size 2) "hello world"))
     (for ([k (in-range 0 12)])
-      (check-equal? (text (navigate ((start (at k)) hw))) "hello world"))
-    (define zc (navigate ((start (at 5)) hw)))
+      (check-equal? (text (navigate ((start (g k)) hw))) "hello world"))
+    (define zc (navigate ((start (g 5)) hw)))
     (check-true   (at-gap? zc))
     (check-equal? (text (insert zc ",")) "hello, world")
 
     ;; --- empty document: the one position is a gap; insert seeds it ---
-    (define ze (navigate ((start (at 0)) ((roper sum) ""))))
+    (define ze (navigate ((start (g 0)) ((roper sum) ""))))
     (check-true   (at-gap? ze))
     (check-equal? (text (insert ze "hi")) "hi")
 
     ;; --- split-at: the refined single-boundary cut, built on bisect ---
     (define r ((roper sum) "abcdef"))
     (define e (sum ""))
-    (let-values ([(l rr) ((split-at (at 3)) e r e)])
+    (let-values ([(l rr) ((split-at ((point off) 3)) e r e)])
       (check-equal? (~a l) "abc")    (check-equal? (~a rr) "def"))
-    (let-values ([(l rr) ((split-at (at 0)) e r e)])
+    (let-values ([(l rr) ((split-at ((point off) 0)) e r e)])
       (check-equal? (~a l) "")       (check-equal? (~a rr) "abcdef"))
-    (let-values ([(l rr) ((split-at (at 6)) e r e)])
+    (let-values ([(l rr) ((split-at ((point off) 6)) e r e)])
       (check-equal? (~a l) "abcdef") (check-equal? (~a rr) ""))
-    (let-values ([(l rr) ((split-at (at 5)) e ((roper sum #:chunk-size 2) "hello world") e)])
+    (let-values ([(l rr) ((split-at ((point off) 5)) e ((roper sum #:chunk-size 2) "hello world") e)])
       (check-equal? (~a l) "hello")  (check-equal? (~a rr) " world"))
 
     ;; --- carve: select a window [a, b) -- two split-at passes ---
-    (define ((seg a b) left right) (+ (sgn (- a left)) (sgn (- b left))))
-    (let-values ([(l m rr) ((carve (seg 2 5)) e r e)])
+    (let-values ([(l m rr) ((carve (win 2 5)) e r e)])
       (check-equal? (~a l) "ab") (check-equal? (~a m) "cde") (check-equal? (~a rr) "f"))
 
+    ;; --- seg-mode navigate: the span decider selects the unit [i, i+1) at the index ---
+    (define zsp (navigate (seg-mode ((start (g 2)) ((roper sum) "abcdef")))))
+    (check-false  (at-gap? zsp))                 ; focus is the element "c"
+    (check-equal? (text (delete zsp)) "abdef")   ; delete the selected element
+
     ;; --- select-seg: focus a span; the span is the focus, delete removes it ---
-    (define zs (select-seg ((start (at 0)) ((roper sum) "abcdef")) (seg 2 5)))
+    (define zs (select-seg ((start (g 0)) ((roper sum) "abcdef")) (win 2 5)))
     (check-equal? (text zs) "abcdef")          ; selecting doesn't change the text
     (check-false  (at-gap? zs))                 ; focus is the span "cde"
     (check-equal? (text (delete zs)) "abf")     ; delete removes the span
     (check-equal? (text (insert zs "X")) "abXf")
 
-    ;; deleting a single element is a seg op now: select [0,1) and delete it
-    (check-equal? (text (delete (select-seg ((start (at 0)) ((roper sum) "abcdef"))
-                                            (seg 0 1))))
+    ;; deleting a single element is a seg op: select [0,1) and delete it
+    (check-equal? (text (delete (select-seg ((start (g 0)) ((roper sum) "abcdef"))
+                                            (win 0 1))))
                   "bcdef")))
 
 ;; ============================================================================
-;; A runnable example: `racket zipper-core.rkt`. A char-count summary, a point
-;; (gap) guide "at offset k", and a span (seg) guide "window [a, b)". The cursor
-;; is shown inline -- | marks a gap, [..] a selected segment.
+;; A runnable example: `racket zipper-core.rkt`. The cursor is shown inline --
+;; | marks a gap, [..] a selected segment. `show` projects the before-summary to
+;; a character offset (off-of) and optionally annotates it (extra, e.g. depth).
 (module+ main
-  (define sum (summariser string-length +))
-  (define ((at k)       l r) (cond [(> l k) -1] [(< l k) 1] [else 0]))   ; point at k
-  (define ((window a b) l r) (+ (sgn (- a l)) (sgn (- b l))))            ; span [a, b)
+  (require "summaries.rkt")
 
-  (define (show tag z)
+  (define ((show off-of [extra (lambda (b) "")]) tag z)
     (define h     (zipper-head z))
-    (define off   (head-before h))         ; chars to the left of the focus
+    (define b     (head-before h))
+    (define o     (off-of b))
     (define foc   (~a (head-rope h)))
     (define whole (text z))
-    (printf "~a~a\n"
+    (printf "~a~a~a\n"
             (~a tag #:min-width 20)
             (if (at-gap? z)
-                (string-append (substring whole 0 off) "|" (substring whole off))
-                (string-append (substring whole 0 off) "[" foc "]"
-                               (substring whole (+ off (string-length foc)))))))
+                (string-append (substring whole 0 o) "|" (substring whole o))
+                (string-append (substring whole 0 o) "[" foc "]"
+                               (substring whole (+ o (string-length foc)))))
+            (extra b)))
 
-  (define doc ((roper sum) "hello world"))
-  (define z0 ((start (nav (at 6) (window 0 5) 'gap)) doc))
-  (show "start (whole doc):" z0)
+  ;; ===== char-count: offset guides, an edit, and moving the shared index =====
+  (printf "--- char-count: offset guides ---\n")
+  (define shc (show values))                                   ; the summary IS the offset
+  (define c0 ((start (axis values 3 'gap)) ((roper char-count) "hello world")))
+  (define c1 (navigate c0))                                    (shc "navigate to 3:" c1)
+  (define c2 (navigate (move c1 (lambda (i) (+ i 4)))))        (shc "move index +4:" c2)
+  (define c3 (insert c2 "X"))                                  (shc "insert \"X\":" c3)
+  (define c4 (delete c3))                                      (shc "delete:" c4)
 
-  (define z1 (navigate z0))                ; gap mode: descend to the point at 6
-  (show "navigate to 6:" z1)
+  ;; ===== sexp: opens-frontier summary; navigate by char OR by open paren =====
+  (printf "\n--- sexp: depth shown as d=N ---\n")
+  (define shx (show sx-chars (lambda (b) (format "   d=~a" (sx-depth b)))))
+  (define ((window field a b) l r) (+ (sgn (- a (field l))) (sgn (- b (field l)))))
+  (define doc ((roper sexp) "(a (b c) d)"))
 
-  (define z2 (insert z1 "brave "))         ; insert -> seg mode, inserted span selected
-  (show "insert \"brave \":" z2)
-
-  (define z3 (delete z2))                  ; delete the selection -> gap mode
-  (show "delete:" z3)
-
-  (define z4 (navigate (seg-mode z3)))     ; seg mode: select the window [0, 5)
-  (show "select [0,5):" z4)
-
-  (define z5 (delete z4))                  ; delete the selection
-  (show "delete selection:" z5)
-
-  (define z6 (insert z5 "HEY"))            ; insert at the gap -> selected
-  (show "insert \"HEY\":" z6)
-
-  (define z7 (navigate (with-guide (gap-mode z6) (at 3))))  ; back to a point at 3
-  (show "navigate to 3:" z7))
+  ;; navigate by character offset
+  (define x1 (navigate ((start (axis sx-chars 4 'gap)) doc)))  (shx "char offset 4:" x1)
+  ;; re-aim onto the OPENS dimension with `with-guides`, then walk it by index
+  (define x2 (navigate (with-guides (with-index x1 1) (point sx-opens) (span sx-opens))))
+  (shx "inside 1st list:" x2)
+  (define x3 (navigate (with-index x2 2)))                     (shx "inside 2nd list:" x3)
+  (define x4 (insert x3 "B"))                                  (shx "insert \"B\":" x4)
+  ;; select the balanced sub-sexp at chars [3, 8) and delete it
+  (define x5 (delete (select-seg ((start (axis sx-chars 0 'gap)) doc) (window sx-chars 3 8))))
+  (shx "delete (b c):" x5))
