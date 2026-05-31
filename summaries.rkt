@@ -1,95 +1,235 @@
 #lang racket
 
-;; Concrete summary algebras built with `summariser`, plus the projections the
-;; zipper's guides read out of them. Analogous to the old per-domain summaries
-;; (deprecated-2/summary-algebras.rkt: char-count, word-count, sexp-frontier).
+;; Concrete summary algebras built with `summariser`, plus the projections and
+;; guides the zipper reads out of them.
+;;
+;; char-count: summary = number of characters.
+;; sexp:       the opens-FRONTIER monoid (ported from the old
+;;             deprecated-2/summary-algebras.rkt sexp-frontier-algebra). Its
+;;             summary value IS the cursor's structural position, so guides can
+;;             address a specific sexp node by tree path, e.g. '(0 3 2 1).
 
-(require "rope-core.rkt")
+(require racket/match
+         "rope-core.rkt")
 
 (provide
- ;; char-count: summary = number of characters. Its own projection is identity.
+ ;; char-count -- projection is identity
  char-count
- ;; sexp: parens + atom (symbol) runs.
+ ;; sexp summary + projections
  sexp
  (struct-out sx)
- sx-depth
- sx-balanced?)
+ sexp-depth
+ sexp-balanced?
+ ;; addresses (tree paths) and the moves over them
+ sexp-address
+ next-sexp-address previous-sexp-address parent-sexp-address
+ ;; guides: the gap before / after the form at a path
+ before-sexp-guide after-sexp-guide)
 
 ;; ---------- char-count ----------
-;; The trivial summary: a character count. The summary value is the number, so a
-;; guide's projection over it is just `values` (identity).
 (define char-count (summariser string-length +))
 
-;; ---------- sexp (parens + symbol runs) ----------
-;; A chunk's summary records both the paren structure and the atom (symbol) runs:
-;;   chars       : character count
-;;   opens/closes: counts of "(" / ")"   (monotone)
-;;   lo          : minimum running net-depth (<= 0); unmatched closes show up here
-;;   starts-atom?: does the chunk begin mid-atom (first char is a symbol char)?
-;;   atoms       : number of atom runs (maximal non-delimiter spans)
-;;   ends-atom?  : does the chunk end mid-atom?
-;; The atom count is a *run-merging* monoid (adapted from the old word-count): two
-;; chunks whose seam is mid-atom share one run, so the join subtracts a double-count.
-;; A delimiter is whitespace or a paren.
-(struct sx (chars opens closes lo starts-atom? atoms ends-atom?) #:transparent)
+;; ---------- sexp (opens frontier) ----------
+;; A chunk's summary records the cursor's structural position as a frontier:
+;;   chars        : character count (offset axis / rendering)
+;;   starts-atom? / starts-form? : first char is an atom char / a form start ("(" or atom)
+;;   ends-atom?   / ends-form?   : last char ...
+;;   closes       : form-counts for ")"s that pop opens opened *before* this chunk
+;;   forms        : forms completed at the current (innermost-open, or top) level
+;;   opens        : the open frontier -- a stack; each entry = forms nested in it so far
+;;   atoms        : number of atom (symbol) runs -- a convenience for symbol guides
+;; combine reconciles the left's open stack against the right's closes
+;; (merge-sexp-frontier) and merges a symbol split across the seam.
+(struct sx (chars starts-atom? starts-form? ends-atom? ends-form? closes forms opens atoms)
+  #:transparent)
 
-(define (atom-char? ch)
-  (not (or (char-whitespace? ch) (char=? ch #\() (char=? ch #\)))))
+(define (sexp-atom? c) (not (or (char-whitespace? c) (char=? c #\() (char=? c #\)))))
+(define (sexp-form-start? c) (or (sexp-atom? c) (char=? c #\()))
 
-(define sexp
-  (summariser
-   ;; measure: one scan tracking net-depth d (+ its min) and atom runs.
-   (lambda (str)
-     (for/fold ([o 0] [c 0] [d 0] [lo 0] [atoms 0] [in? #f] [starts? #f] [seen? #f]
-                #:result (sx (string-length str) o c lo starts? atoms in?))
-               ([ch (in-string str)])
-       (define a? (atom-char? ch))
-       (define d* (cond [(char=? ch #\() (add1 d)] [(char=? ch #\)) (sub1 d)] [else d]))
-       (values (if (char=? ch #\() (add1 o) o)
-               (if (char=? ch #\)) (add1 c) c)
-               d* (min lo d*)
-               (+ atoms (if (and a? (not in?)) 1 0))     ; a new run starts here
-               a?                                         ; in-run state -> ends-atom?
-               (if seen? starts? a?)                      ; first char's atom-ness
-               #t)))
-   ;; combine: counts add; lo threads left depth; atom runs merge across the seam.
-   (lambda (a b)
-     (sx (+ (sx-chars a)  (sx-chars b))
-         (+ (sx-opens a)  (sx-opens b))
-         (+ (sx-closes a) (sx-closes b))
-         (min (sx-lo a) (+ (- (sx-opens a) (sx-closes a)) (sx-lo b)))
-         (if (zero? (sx-chars a)) (sx-starts-atom? b) (sx-starts-atom? a))
-         (- (+ (sx-atoms a) (sx-atoms b))
-            (if (and (sx-ends-atom? a) (sx-starts-atom? b)) 1 0))
-         (if (zero? (sx-chars b)) (sx-ends-atom? a) (sx-ends-atom? b))))))
+;; a new form at the current level: top-level bumps `forms`, else the innermost open's count
+(define (bump-sexp forms opens)
+  (if (null? opens)
+      (values (add1 forms) opens)
+      (values forms (cons (add1 (car opens)) (cdr opens)))))
 
-;; net open depth at the end of the chunk (opens minus closes).
-(define (sx-depth s) (- (sx-opens s) (sx-closes s)))
+(define (sexp-leaf s)
+  (define n (string-length s))
+  (if (zero? n)
+      (sx 0 #f #f #f #f '() 0 '() 0)                ; the monoid identity (empty chunk)
+      (let-values
+          ([(closes forms opens in? ef? atoms)
+            (for/fold ([closes '()] [forms 0] [opens '()] [in? #f] [ef? #f] [atoms 0])
+                      ([c (in-string s)])
+              (cond
+                [(sexp-atom? c)
+                 (if in?
+                     (values closes forms opens #t #t atoms)            ; same atom continues
+                     (let-values ([(forms opens) (bump-sexp forms opens)])
+                       (values closes forms opens #t #t (add1 atoms))))] ; new atom = new form
+                [(char=? c #\()
+                 (let-values ([(forms opens)
+                               (if (null? opens) (values forms opens) (bump-sexp forms opens))])
+                   (values closes forms (cons 0 opens) #f #f atoms))]    ; push a new open
+                [(char=? c #\))
+                 (if (null? opens)
+                     (values (cons forms closes) 0 opens #f #t atoms)    ; unmatched close
+                     (let ([opens (cdr opens)])                          ; pop one open
+                       (values closes (if (null? opens) (add1 forms) forms) opens #f #t atoms)))]
+                [else (values closes forms opens #f #f atoms)]))])       ; whitespace
+        (sx n
+            (sexp-atom? (string-ref s 0))
+            (sexp-form-start? (string-ref s 0))
+            in? ef?
+            (reverse closes) forms (reverse opens) atoms))))
 
-;; a chunk is a balanced run iff it never dips below 0 and returns to 0.
-(define (sx-balanced? s) (and (= 0 (sx-depth s)) (>= (sx-lo s) 0)))
+;; drop the double-counted form-start at y's beginning when the seam is mid-atom
+(define (drop-start-sexp-atom x)
+  (match-define (sx ch sa? sf? za? zf? closes forms opens at) x)
+  (if (pair? closes)
+      (sx ch sa? sf? za? zf? (cons (sub1 (car closes)) (cdr closes)) forms opens at)
+      (sx ch sa? sf? za? zf? closes (sub1 forms) opens at)))
+
+(define (add-inner-sexp opens n)
+  (match opens
+    [(list x)    (list (+ x n))]
+    [(cons x xs) (cons x (add-inner-sexp xs n))]))
+
+;; reconcile the left's (forms, opens-stack) against the right's (closes, forms, opens)
+(define (merge-sexp-frontier forms opens closes right-forms right-opens)
+  (let loop ([forms forms] [stack (reverse opens)] [closes closes] [out '()])
+    (match closes
+      ['()
+       (if (null? stack)
+           (values (reverse out) (+ forms right-forms) right-opens)
+           (let* ([opens (reverse stack)]
+                  [extra (+ right-forms (if (pair? right-opens) 1 0))]
+                  [opens (if (zero? extra) opens (add-inner-sexp opens extra))])
+             (values (reverse out) forms (append opens right-opens))))]
+      [(cons close-count rest)
+       (if (pair? stack)
+           (let ([stack (cdr stack)])
+             (loop (if (null? stack) (add1 forms) forms) stack rest out))
+           (loop 0 stack rest (cons (+ forms close-count) out)))])))
+
+(define (sexp-combine x y)
+  (cond
+    [(zero? (sx-chars x)) y]                 ; identity short-circuits (keeps y intact)
+    [(zero? (sx-chars y)) x]
+    [else
+     (match-define (sx xch xa? xs? xz? xe? xc xf xo xat) x)
+     (define seam-atom? (and xz? (sx-starts-atom? y)))
+     (define y* (if seam-atom? (drop-start-sexp-atom y) y))
+     (match-define (sx ych _ya? _ys? yz? ye? yc yf yo yat) y*)
+     (define-values (closes forms opens) (merge-sexp-frontier xf xo yc yf yo))
+     (sx (+ xch ych) xa? xs? yz? ye?
+         (append xc closes) forms opens
+         (- (+ xat yat) (if seam-atom? 1 0)))]))
+
+(define sexp (summariser sexp-leaf sexp-combine))
+
+;; current nesting depth (unclosed opens) and balance, off a prefix summary
+(define (sexp-depth s) (length (sx-opens s)))
+(define (sexp-balanced? s) (and (null? (sx-opens s)) (null? (sx-closes s))))
+
+;; ---------- addresses (tree paths) ----------
+;; The address of the cursor sitting just after a prefix: the form-count at the
+;; top level, then the per-open form counts down the frontier, with the innermost
+;; bumped (so it names the *next* form to start). #f / empty -> '(0).
+(define (sexp-next-address s)
+  (define (opens->address opens)
+    (match opens
+      ['() '()]
+      [(list innermost) (list (add1 innermost))]
+      [(cons child-count rest) (cons child-count (opens->address rest))]))
+  (cons (sx-forms s) (opens->address (sx-opens s))))
+
+(define (drop-trailing-zero-addresses path)
+  (define trimmed
+    (let loop ([r (reverse path)])
+      (match r [(cons 0 rest) (loop rest)] [_ (reverse r)])))
+  (if (null? trimmed) '(0) trimmed))
+
+(define (next-sexp-address path)
+  (match (drop-trailing-zero-addresses path)
+    [(list index)      (list (add1 index))]
+    [(cons index rest) (cons index (next-sexp-address rest))]))
+
+(define (previous-sexp-address path)
+  (match (drop-trailing-zero-addresses path)
+    [(list index)
+     (if (zero? index)
+         (error 'sexp-address "cannot move before the first form: ~v" path)
+         (list (sub1 index)))]
+    [(cons index rest) (cons index (previous-sexp-address rest))]))
+
+(define (parent-sexp-address path)
+  (define normalized (drop-trailing-zero-addresses path))
+  (define (drop-last p) (match p [(list _) '()] [(cons f r) (cons f (drop-last r))]))
+  (match normalized
+    [(list _) (error 'parent-sexp-address "top-level form has no parent: ~v" path)]
+    [_ (drop-last normalized)]))
+
+(define (sexp-path-compare x y)
+  (define (cmp x y)
+    (match* (x y)
+      [('() '()) 0] [('() _) -1] [(_ '()) 1]
+      [((cons x0 xs) (cons y0 ys))
+       (cond [(< x0 y0) -1] [(> x0 y0) 1] [else (cmp xs ys)])]))
+  (cmp (drop-trailing-zero-addresses x) (drop-trailing-zero-addresses y)))
+
+;; the address of the form straddled by a (before, after) cut -- an inside-atom
+;; cut keeps the address of the atom it sits in.
+(define (sexp-address left right)
+  (define next-path (sexp-next-address left))
+  (if (and (sx-ends-atom? left) (sx-starts-atom? right))
+      (previous-sexp-address next-path)
+      next-path))
+
+;; ---------- guides ----------
+;; gap just before the form at `path`
+(define (before-sexp-guide path)
+  (lambda (before after)
+    (case (sexp-path-compare (sexp-next-address before) path)
+      [(-1) 1]
+      [(1) -1]
+      [(0) (if (and (sx-starts-form? after)
+                    (not (and (sx-ends-atom? before) (sx-starts-atom? after))))
+               0 1)])))
+
+;; gap just after the form at `path`
+(define (after-sexp-guide path)
+  (define next-path (next-sexp-address path))
+  (lambda (before after)
+    (case (sexp-path-compare (sexp-next-address before) next-path)
+      [(-1) 1]
+      [(1) -1]
+      [(0) (cond [(and (sx-ends-atom? before) (sx-starts-atom? after)) 1]
+                 [(sx-ends-form? before) 0]
+                 [else -1])])))
 
 ;; ============================================================================
 (module+ test
   (require rackunit)
+
+  ;; --- the monoid: counts, atoms, balance, and chunk-invariance ---
   (define s (sexp "(a (b c) d)"))
-  (check-equal? (sx-chars s)  11)
-  (check-equal? (sx-opens s)  2)
-  (check-equal? (sx-closes s) 2)
-  (check-equal? (sx-depth s)  0)
-  (check-equal? (sx-atoms s)  4)         ; a b c d
-  (check-true   (sx-balanced? s))
+  (check-equal? (sx-chars s) 11)
+  (check-equal? (sx-atoms s) 4)            ; a b c d
+  (check-equal? (sexp-depth s) 0)
+  (check-true   (sexp-balanced? s))
+  (check-true   (positive? (sexp-depth (sexp "(("))))      ; two unclosed opens
+  (check-equal? (sexp-depth (sexp "((")) 2)
 
-  ;; run-merging across a seam: the variadic `sexp` combines summaries directly
-  (check-equal? (sx-atoms (sexp "ab")) 1)
-  (check-equal? (sx-atoms (sexp (sexp "a")  (sexp "b"))) 1)   ; "a" + "b"  = one atom
-  (check-equal? (sx-atoms (sexp (sexp "a ") (sexp "b"))) 2)   ; "a " + "b" = two atoms
+  ;; the same text chunked any which way gives the same summary (associativity)
+  (check-equal? (sexp "(a (b c) d)")
+                (sexp (sexp "(a (b") (sexp " c) d)")))
+  (check-equal? (sx-atoms (sexp (sexp "a") (sexp "b")))  1)   ; "a"  + "b"  = one atom
+  (check-equal? (sx-atoms (sexp (sexp "ab ") (sexp "c"))) 2)  ; "ab " + "c" = two atoms
 
-  ;; coerced through a rope (even chunked), the cached summary matches
-  (define r ((roper sexp #:chunk-size 1) "(a (b c) d)"))
-  (check-equal? (sx-atoms (sexp r)) 4)
-  (check-equal? (sx-opens (sexp r)) 2)
-
-  ;; balance: unmatched close shows up as lo < 0
-  (check-true  (negative? (sx-lo (sexp ") ("))))
-  (check-false (sx-balanced? (sexp "(()"))))
+  ;; --- addresses ---
+  (check-equal? (sexp-next-address (sexp "")) '(0))
+  (check-equal? (next-sexp-address '(0 2)) '(0 3))
+  (check-equal? (previous-sexp-address '(0 3)) '(0 2))
+  (check-equal? (parent-sexp-address '(0 3 2)) '(0 3))
+  (check-equal? (sexp-path-compare '(0 2) '(0 3)) -1)
+  (check-equal? (sexp-path-compare '(0 3 0 0) '(0 3)) 0))    ; trailing zeros are the same boundary

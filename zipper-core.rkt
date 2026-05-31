@@ -27,7 +27,7 @@
 
 (provide
  ;; nav + guide construction
- nav axis run-axis point span
+ nav axis run-axis addr-axis point span
  ;; mode / index / guide edits
  gap-mode seg-mode with-index move with-guides with-axis
  ;; ops
@@ -85,6 +85,15 @@
   (define lg (runs-gap count starts? ends?))
   (define eg (runs-end count starts? ends?))
   (nav lg (lambda (j) (lambda (b t a) (carve2 (lg j) (eg j) b t a))) i mode))
+
+;; addr-axis: a nav whose index is an *address* and whose guides come from a pair
+;; of address-deciders (address -> guide) -- `before` gives the gap before the
+;; addressed item, `after` the gap after it; the seg carves the item between them.
+;; Structural moves are then just index edits (e.g. (move z parent-address)).
+(define (addr-axis before after index mode)
+  (nav before
+       (lambda (p) (lambda (b t a) (carve2 (before p) (after p) b t a)))
+       index mode))
 
 ;; Editing the nav (plain struct-copy -- no lens library): flip the mode, set or
 ;; move the shared index, or replace the deciders (re-aim onto another dimension).
@@ -291,7 +300,9 @@
 ;; ============================================================================
 (module+ test
   (require rackunit
-           (only-in "summaries.rkt" sexp sx-chars sx-atoms sx-starts-atom? sx-ends-atom?))
+           (only-in "summaries.rkt"
+                    sexp sx-chars sx-atoms sx-starts-atom? sx-ends-atom?
+                    before-sexp-guide after-sexp-guide next-sexp-address parent-sexp-address))
   (let ()
     (define sum (summariser string-length +))
     (define (off s) s)                                       ; char-count projection
@@ -390,7 +401,22 @@
     ;; insert at the gap before a symbol absorbs into it
     (define zb (insert (navigate ((start (syms 1 'gap)) sdoc)) "B"))
     (check-equal? (text zb) "(f Ba b)")
-    (check-equal? (focus zb) "Ba")))
+    (check-equal? (focus zb) "Ba")
+
+    ;; --- sexp path navigation (frontier guides), ported from deprecated-2 ---
+    (define dsrc ((roper sexp #:chunk-size 3)
+                  "(define square\n  (lambda (x)\n    (* x x)))\n(+ 1 2)"))
+    (define (gap-at p)  (navigate ((start (addr-axis before-sexp-guide after-sexp-guide p 'gap)) dsrc)))
+    (define (form-at p) (focus (navigate ((start (addr-axis before-sexp-guide after-sexp-guide p 'seg)) dsrc))))
+    (define (left-of z) (substring (text z) 0 (sx-chars (head-before (zipper-head z)))))
+    (check-equal? (left-of (gap-at '(0 2))) "(define ")          ; gap before "square"
+    (check-equal? (form-at '(0 2)) "square")                     ; the form there
+    (check-equal? (form-at '(0 3 2 1)) "x")                      ; deep path -> the bound var
+    (check-true (string-suffix? (left-of (gap-at '(1))) "\n"))   ; before the 2nd top-level form
+    (check-true (string-prefix? (form-at '(1)) "(+ 1 2)"))
+    ;; structural moves are index edits on the path
+    (check-true (string-prefix? (form-at (next-sexp-address '(0 2))) "(lambda"))
+    (check-equal? (parent-sexp-address '(0 3 2 1)) '(0 3 2))))
 
 ;; ============================================================================
 ;; A runnable example: `racket zipper-core.rkt`. The cursor is shown inline --
@@ -422,19 +448,23 @@
   (define c3 (insert c2 "X"))                                  (shc "insert \"X\":" c3)
   (define c4 (delete c3))                                      (shc "delete:" c4)
 
-  ;; ===== sexp: paren structure -- navigate by char / open paren, show depth ====
-  (printf "\n--- sexp: paren structure (depth d=N) ---\n")
-  (define shx (show sx-chars (lambda (b) (format "   d=~a" (sx-depth b)))))
+  ;; ===== sexp: structural navigation -- the index is a tree PATH =====
+  (printf "\n--- sexp: path navigation (depth d=N) ---\n")
+  (define shx (show sx-chars (lambda (b) (format "   d=~a" (sexp-depth b)))))
   (define doc ((roper sexp) "(a (b c) d)"))
-  (define x1 (navigate ((start (axis sx-chars 4 'gap)) doc)))   (shx "char offset 4:" x1)
-  ;; re-aim onto the OPENS dimension with `with-axis`, walk it by open-paren index
-  (define x2 (navigate (with-axis (with-index x1 1) sx-opens))) (shx "inside 1st list:" x2)
-  (define x3 (navigate (with-index x2 2)))                      (shx "inside 2nd list:" x3)
+  ;; paths: '(0) is the whole top-level list; children are 1-indexed inside it.
+  (define (form p) (navigate ((start (addr-axis before-sexp-guide after-sexp-guide p 'seg)) doc)))
+  (shx "form (0):"     (form '(0)))      ; the whole top-level list
+  (shx "form (0 1):"   (form '(0 1)))    ; child 1  -> a
+  (shx "form (0 2):"   (form '(0 2)))    ; child 2  -> (b c)
+  (shx "form (0 2 1):" (form '(0 2 1)))  ; grandchild -> b
 
-  ;; ===== sexp: symbol-aware -- insert absorbs into the symbol, delete removes it =
-  (printf "\n--- sexp: symbol-aware editing ---\n")
-  (define (syms i mode) (run-axis sx-atoms sx-starts-atom? sx-ends-atom? i mode))
-  (define y0 (navigate ((start (syms 1 'gap)) doc)))   (shx "before atom #1 (b):" y0)
-  (define y1 (insert y0 "B"))                          (shx "insert \"B\":" y1)
-  (define y2 (navigate (with-index y1 2)))             (shx "select atom #2 (c):" y2)
-  (define y3 (delete y2))                              (shx "delete it:" y3))
+  ;; structural moves are just index edits on the path
+  (printf "\n--- sexp: structural moves from (0 2 1) = b ---\n")
+  (define here (form '(0 2 1)))                             (shx "at (0 2 1):" here)
+  (shx "  parent ->"       (navigate (move here parent-sexp-address)))
+  (shx "  next sibling ->" (navigate (move here next-sexp-address)))
+
+  ;; edit at a structural location: replace the form at (0 2)
+  (printf "\n--- sexp: edit at a location ---\n")
+  (shx "replace (0 2):" (insert (form '(0 2)) "X")))

@@ -1,10 +1,11 @@
 #lang racket
 
-;; A longer editing / navigation session over the sexp summary, showing the
-;; pieces working together. Run with:  racket examples.rkt
+;; A structural editing / navigation session over the sexp opens-frontier summary.
+;; The index is a tree PATH -- '(0) is the top-level form, children are 1-indexed
+;; inside it -- so navigation addresses real sexp nodes and the moves (parent,
+;; next/previous sibling) are just edits to that path.  Run:  racket examples.rkt
 ;;
-;; Cursor shown inline -- | is a gap (point), [..] a selected segment -- and
-;; d=N is the paren depth at the cursor (read from the sexp summary).
+;; Cursor inline: | a gap (point), [..] a selected form.  d=N = paren depth.
 
 (require "rope-core.rkt" "summaries.rkt" "zipper-core.rkt")
 
@@ -19,44 +20,27 @@
               (string-append (substring whole 0 o) "|" (substring whole o))
               (string-append (substring whole 0 o) "[" foc "]"
                              (substring whole (+ o (string-length foc)))))
-          (sx-depth (head-before h))))
+          (sexp-depth (head-before h))))
 
-;; three navigation dimensions over the sexp summary, sharing one index
-(define (by-symbol i [m 'gap]) (run-axis sx-atoms sx-starts-atom? sx-ends-atom? i m))
-(define (by-char   i [m 'gap]) (axis sx-chars i m))
-(define (by-open   i [m 'gap]) (axis sx-opens i m))
-(define ((win field a b) l r) (+ (sgn (- a (field l))) (sgn (- b (field l)))))
+;; a sexp nav whose index is a path
+(define (at-path p [m 'seg]) (addr-axis before-sexp-guide after-sexp-guide p m))
 
-(printf "doc: (a b c)\n\n")
-(define src ((roper sexp) "(a b c)"))
+(printf "doc: (let (x 1) (+ x 2))\n\n")
+(define src ((roper sexp) "(let (x 1) (+ x 2))"))
 
-(define z (navigate ((start (by-symbol 0 'seg)) src)))
-(show "select symbol 0:" z)
-(set! z (navigate (with-index z 1)))                      (show "  -> symbol 1:" z)
-(set! z (navigate (with-index z 2)))                      (show "  -> symbol 2:" z)
+;; --- address forms directly by path ---
+(define z (navigate ((start (at-path '(0))) src)))   (show "form (0):" z)        ; whole list
+(set! z (navigate (with-index z '(0 1))))            (show "form (0 1):" z)       ; let
+(set! z (navigate (with-index z '(0 2))))            (show "form (0 2):" z)       ; (x 1)
+(set! z (navigate (with-index z '(0 2 1))))          (show "form (0 2 1):" z)     ; x
 
-;; gap before symbol 1, then insert -- it absorbs into the symbol
-(set! z (navigate (gap-mode (with-index z 1))))           (show "gap before symbol 1:" z)
-(set! z (insert z "X"))                                   (show "insert \"X\" (absorb):" z)
+;; --- structural moves: parent / sibling are edits to the path index ---
+(set! z (navigate (move z next-sexp-address)))       (show "next sibling:" z)     ; 1
+(set! z (navigate (move z parent-sexp-address)))     (show "parent:" z)           ; (x 1)
+(set! z (navigate (move z next-sexp-address)))       (show "next sibling:" z)     ; (+ x 2)
 
-;; select symbol 2 and replace it (insert over a selection replaces)
-(set! z (navigate (with-index z 2)))                      (show "select symbol 2:" z)
-(set! z (insert z "cat"))                                 (show "replace with \"cat\":" z)
+;; --- edit at a location: replace the binding's value, then delete the binding ---
+(set! z (insert (navigate (with-index z '(0 2 2))) "99"))  (show "set (0 2 2) = 99:" z)
+(set! z (delete (navigate (with-index z '(0 2)))))         (show "delete (0 2):" z)
 
-;; select symbol 0 and delete it
-(set! z (navigate (with-index z 0)))                      (show "select symbol 0:" z)
-(set! z (delete z))                                       (show "delete it:" z)
-
-;; re-aim onto open-parens; step inside the list -- navigation only, depth shows it
-(set! z (navigate (with-axis (with-index (gap-mode z) 1) sx-opens)))
-(show "inside the list:" z)
-
-;; re-aim onto characters; insert a leading marker at offset 0
-(set! z (navigate (with-axis (with-index z 0) sx-chars)))  (show "char offset 0:" z)
-(set! z (insert z ";"))                                    (show "insert \";\":" z)
-
-;; select a character range [3, 6) and delete it
-(set! z (delete (select-seg (to-root z) (win sx-chars 3 6))))
-(show "delete chars [3,6):" z)
-
-(printf "\nfinal text: ~s\n" (text z))
+(printf "\nfinal: ~s\n" (text z))
