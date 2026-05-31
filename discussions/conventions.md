@@ -145,3 +145,19 @@ user redirects.
 This refines *Merging to master*: the word "merge"/"master" is still needed to
 first send work to master, but amendments to the same work then stay there by
 default.
+
+## "Unless I'm mistaken, do X" is a conditional go-ahead
+
+When the user attaches a hedge like "unless I'm mistaken," "if I'm right," or
+"check me" to an instruction, the hedge asks you to verify the premise first,
+then act on the result:
+
+- **Premise holds** → do X, and confirm they were right.
+- **Premise is wrong** → do *not* do X. Point out what they overlooked, so the
+  mistaken step never lands.
+
+The hedge is the user handing you a check to run, not a formality to wave
+through.
+
+Unlike a bare question (see *Questions are questions*), this *is* a go-ahead —
+just one conditioned on the premise being true.
