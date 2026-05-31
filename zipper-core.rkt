@@ -81,16 +81,31 @@
     [(0)  (arrange smr b L mt R a)]    ; split-gap   : (L, .., R)
     [else (error 'pick "guide must return -1, 0, or 1")]))
 
-;; descender: step down until the focus can't split -- the guide stopped in a gap
-;; (empty focus), or it drilled to a single element (atom). Either way the
-;; resting focus is where an edit applies. Each step pushes a crumb.
+;; atom->gap: at a single element the descent can't bisect further, so place the
+;; element on whichever side the guide points and leave an empty gap. This is the
+;; explicit "switch to a gap" -- gap-mode navigation lands *between* elements,
+;; never on one. (Mirrors `split-at`'s atom case.)
+(define (atom->gap guide h)
+  (match-define (head b t a) h)
+  (define smr (rope-algebra t))
+  (define mt  (empty-rope smr))
+  (if (positive? (guide b (smr t a)))
+      (arrange smr b t mt mt a)     ; element on the left  -> gap after it
+      (arrange smr b mt mt t a)))   ; element on the right -> gap before it
+
+;; descender: step down until the focus is a gap (empty). A bisection stops in a
+;; gap when the guide returns 0; reaching a single element, `atom->gap` sets it
+;; aside so the cursor still lands in a gap. Each step pushes a crumb.
 (define ((descender guide) h crumbs)
   (define step (pick guide))
   (let loop ([h h] [crumbs crumbs])
-    (if (atom? (head-rope h))
-        (values h crumbs)
-        (let-values ([(h* put) (step h)])
-          (loop h* (cons put crumbs))))))
+    (define t (head-rope h))
+    (cond
+      [(empty-rope? t) (values h crumbs)]               ; a gap -- done
+      [(atom? t) (let-values ([(h* put) (atom->gap guide h)])
+                   (values h* (cons put crumbs)))]      ; element -> gap beside it
+      [else (let-values ([(h* put) (step h)])
+              (loop h* (cons put crumbs)))])))
 
 ;; split-at: descend `t` to the exact boundary the guide marks, returning the two
 ;; sides as ropes. The refined cut -- recursive bisect + guide, built only on the
@@ -251,14 +266,15 @@
       (check-equal? (text zk) "abcdef")
       (check-true  (at-root? (to-root zk))))
 
-    ;; --- at the extremes the guide drills to one element: the focus lands *on* it ---
+    ;; --- gap mode always lands in a gap, even at the extremes (atom->gap) ---
     (define zL (navigate ((start (at 0)) ((roper sum) "abcdef"))))
-    (check-false  (at-gap? zL))                         ; focused on the element "a"
-    (check-equal? (text (delete zL)) "bcdef")           ; delete removes it
-    (check-equal? (text (insert zL "Q")) "Qbcdef")      ; insert replaces it
+    (check-true  (at-gap? zL))                          ; a gap *before* "a", not on it
+    (check-equal? (text (insert zL "Q")) "Qabcdef")     ; insert at the gap
+    (check-equal? (text (delete zL)) "abcdef")          ; delete at a gap is a no-op
 
     (define zR (navigate ((start (at 6)) ((roper sum) "abcdef"))))
-    (check-equal? (text (delete zR)) "abcde")
+    (check-true  (at-gap? zR))                          ; a gap *after* "f"
+    (check-equal? (text (insert zR "Z")) "abcdefZ")
 
     ;; --- delete at a gap removes nothing (empty focus -> empty) ---
     (check-equal? (text (delete z3)) "abcdef")
@@ -303,7 +319,12 @@
     (check-equal? (text zs) "abcdef")          ; selecting doesn't change the text
     (check-false  (at-gap? zs))                 ; focus is the span "cde"
     (check-equal? (text (delete zs)) "abf")     ; delete removes the span
-    (check-equal? (text (insert zs "X")) "abXf")))
+    (check-equal? (text (insert zs "X")) "abXf")
+
+    ;; deleting a single element is a seg op now: select [0,1) and delete it
+    (check-equal? (text (delete (select-seg ((start (at 0)) ((roper sum) "abcdef"))
+                                            (seg 0 1))))
+                  "bcdef")))
 
 ;; ============================================================================
 ;; A runnable example: `racket zipper-core.rkt`. A char-count summary, a point
