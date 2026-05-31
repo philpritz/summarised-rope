@@ -31,7 +31,10 @@
  ;; mode / index / guide edits
  gap-mode seg-mode with-index move with-guides with-axis
  ;; ops
- start navigate select-seg to-root edit-head insert delete text at-gap? at-root?)
+ start navigate realign-cursor select-seg to-root edit-head insert delete
+ text at-gap? at-root?
+ ;; cursor inspection (for rendering / clients)
+ zipper-head head-before head-rope head-after)
 
 (struct head (before rope after) #:transparent)
 (struct zipper (guide head crumbs) #:transparent)
@@ -74,9 +77,9 @@
   (lambda (l r)
     (cond [(< (count l) target) 1]
           [(> (count l) target) -1]
-          [(starts? r) 1]
-          [(ends? l)   0]      ; left ends run i -> here (gap after run i)
-          [else       -1])))
+          [(and (ends? l) (not (starts? r))) 0]  ; left ends run i, right is delimiter -> here
+          [(ends? l) 1]                          ; seam is mid-run (run continues right) -> right
+          [else -1])))                           ; past run i, in trailing delimiter -> left
 ;; run-axis: a nav along a runs dimension -- gap before run i, seg = run i exactly.
 (define (run-axis count starts? ends? i mode)
   (define lg (runs-gap count starts? ends?))
@@ -287,7 +290,8 @@
 
 ;; ============================================================================
 (module+ test
-  (require rackunit)
+  (require rackunit
+           (only-in "summaries.rkt" sexp sx-chars sx-atoms sx-starts-atom? sx-ends-atom?))
   (let ()
     (define sum (summariser string-length +))
     (define (off s) s)                                       ; char-count projection
@@ -374,7 +378,19 @@
     ;; deleting a single element is a seg op: select [0,1) and delete it
     (check-equal? (text (delete (select-seg ((start (g 0)) ((roper sum) "abcdef"))
                                             (win 0 1))))
-                  "bcdef")))
+                  "bcdef")
+
+    ;; --- run-axis: symbol-aware select / insert over the sexp summary ---
+    (define (syms i [m 'gap]) (run-axis sx-atoms sx-starts-atom? sx-ends-atom? i m))
+    (define (focus z) (~a (head-rope (zipper-head z))))
+    (define sdoc ((roper sexp) "(f a b)"))
+    (check-equal? (focus (navigate ((start (syms 0 'seg)) sdoc))) "f")
+    (check-equal? (focus (navigate ((start (syms 1 'seg)) sdoc))) "a")   ; each symbol exactly
+    (check-equal? (focus (navigate ((start (syms 2 'seg)) sdoc))) "b")
+    ;; insert at the gap before a symbol absorbs into it
+    (define zb (insert (navigate ((start (syms 1 'gap)) sdoc)) "B"))
+    (check-equal? (text zb) "(f Ba b)")
+    (check-equal? (focus zb) "Ba")))
 
 ;; ============================================================================
 ;; A runnable example: `racket zipper-core.rkt`. The cursor is shown inline --
