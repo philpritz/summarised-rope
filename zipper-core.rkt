@@ -27,9 +27,9 @@
 
 (provide
  ;; nav + guide construction
- nav axis point span
+ nav axis run-axis point span
  ;; mode / index / guide edits
- gap-mode seg-mode with-index move with-guides
+ gap-mode seg-mode with-index move with-guides with-axis
  ;; ops
  start navigate select-seg to-root edit-head insert delete text at-gap? at-root?)
 
@@ -49,12 +49,39 @@
 ;; number). They share the index -- the gap is the boundary where `field` of the
 ;; left context reaches the index; the seg selects the unit [index, index+1) in
 ;; `field`'s units (so the gap is the seg's left edge -- that is their alignment).
+;; A seg decider returns a *carver* `(b t a) -> (values l m r)`.
 (define ((point field) i)
   (lambda (l r) (define x (field l)) (cond [(> x i) -1] [(< x i) 1] [else 0])))
 (define ((span field) i)
   (lambda (l r) (define x (field l)) (+ (sgn (- i x)) (sgn (- (add1 i) x)))))
-;; axis: a nav along one summary dimension -- both deciders from one projection.
-(define (axis field i mode) (nav (point field) (span field) i mode))
+(define (span-carver field) (lambda (i) (carve ((span field) i))))
+;; axis: a nav along one summary dimension -- point gap, span seg.
+(define (axis field i mode) (nav (point field) (span-carver field) i mode))
+
+;; runs: guides over maximal runs of some char class, parameterised by three
+;; projections -- count (# runs strictly left), starts? (chunk begins mid-run),
+;; ends? (chunk ends mid-run). The gap is before run i; the seg selects run i
+;; exactly, its edges read off the flags (the old word-start / word-end shape).
+(define ((runs-gap count starts? ends?) i)
+  (lambda (l r)
+    (cond [(< (count l) i) 1]
+          [(> (count l) i) -1]
+          [(ends? l)   1]      ; left ends mid-run i -> right
+          [(starts? r) 0]      ; right begins run i -> here (gap before run i)
+          [else        1])))   ; in the delimiters before run i -> right
+(define ((runs-end count starts? ends?) i)
+  (define target (add1 i))
+  (lambda (l r)
+    (cond [(< (count l) target) 1]
+          [(> (count l) target) -1]
+          [(starts? r) 1]
+          [(ends? l)   0]      ; left ends run i -> here (gap after run i)
+          [else       -1])))
+;; run-axis: a nav along a runs dimension -- gap before run i, seg = run i exactly.
+(define (run-axis count starts? ends? i mode)
+  (define lg (runs-gap count starts? ends?))
+  (define eg (runs-end count starts? ends?))
+  (nav lg (lambda (j) (lambda (b t a) (carve2 (lg j) (eg j) b t a))) i mode))
 
 ;; Editing the nav (plain struct-copy -- no lens library): flip the mode, set or
 ;; move the shared index, or replace the deciders (re-aim onto another dimension).
@@ -67,6 +94,9 @@
 (define (move z f)       (edit-nav z (lambda (n) (struct-copy nav n [index (f (nav-index n))]))))
 (define (with-guides z gap seg)
   (edit-nav z (lambda (n) (struct-copy nav n [gap gap] [seg seg]))))
+;; with-axis: re-aim onto a span dimension (point gap, span seg), keeping index/mode.
+(define (with-axis z field)
+  (edit-nav z (lambda (n) (struct-copy nav n [gap (point field)] [seg (span-carver field)]))))
 
 ;; ---------- helpers (operate on unpacked head / crumbs) ----------
 
@@ -141,16 +171,19 @@
          [(0)  (values L R)]
          [else (error 'split-at "guide must return -1, 0, or 1")])])))
 
-;; carve: the segment between a seg-guide's two boundaries, as (l, m, r) ropes.
-;; Two split-at passes: the -1 cut finds the left edge, the +1 the right. A
-;; seg-guide is 5-valued -- sgn(a-left)+sgn(b-left) -- offset to a 3-valued
-;; boundary guide for each edge.
-(define ((carve seg-guide) b t a)
+;; carve2: the span between two boundary guides -- left edge then right edge, two
+;; split-at passes. A *carver* is `(b t a) -> (values l m r)`.
+(define (carve2 left-guide right-guide b t a)
   (define smr (rope-algebra t))
-  (define ((bound off) sl sr) (sgn (+ (seg-guide sl sr) off)))
-  (define-values (l rest) ((split-at (bound -1)) b t a))
-  (define-values (m r)    ((split-at (bound 1)) (smr b l) rest a))
+  (define-values (l rest) ((split-at left-guide) b t a))
+  (define-values (m r)    ((split-at right-guide) (smr b l) rest a))
   (values l m r))
+
+;; carve: a carver from one 5-valued seg-guide -- sgn(a-left)+sgn(b-left) offset
+;; +/-1 into the two boundary guides (a symmetric window).
+(define ((carve seg-guide) b t a)
+  (define ((bound off) sl sr) (sgn (+ (seg-guide sl sr) off)))
+  (carve2 (bound -1) (bound 1) b t a))
 
 ;; rise: pop one crumb and apply it, reconstructing the parent focus. Takes no
 ;; guide -- the repair is purely structural.
@@ -200,7 +233,7 @@
      (match-define (zipper _ rh rc) (to-root z))
      (match-define (head b t a) rh)
      (define smr (rope-algebra t))
-     (define-values (l m r) ((carve (live-seg n)) b t a))
+     (define-values (l m r) ((live-seg n) b t a))     ; live-seg is a carver
      (let-values ([(h* put) (arrange smr b l m r a)])
        (zipper n h* (cons put rc)))]
     [else (error 'navigate "nav mode must be 'gap or 'seg")]))
@@ -221,13 +254,13 @@
   (define smr (rope-algebra t))
   (zipper guide (head b ((roper smr) (f t)) a) crumbs))
 
-;; insert / delete: edit the focus, then flip the mode to match what it now is.
-;; insert puts content in -- the result is a span -> seg mode (the inserted text
-;; is the selection). delete empties the focus (roper drops it on rebuild) -> gap
-;; mode (a point where the edit was). The switch keeps the focus and the live
-;; guide in harmony without re-navigating.
-(define (insert z content) (seg-mode (edit-head z (lambda (t) content))))
-(define (delete z)         (gap-mode (edit-head z (lambda (t) ""))))
+;; insert / delete: edit the focus, flip the mode, then RE-NAVIGATE (reharmonise)
+;; so the cursor re-materialises against the live guide on the edited rope.
+;; insert -> seg mode, so it re-selects the unit the insert landed in (e.g. with a
+;; symbol guide, typing into a symbol re-selects the whole symbol). delete -> gap
+;; mode, collapsing to the point where the edit was.
+(define (insert z content) (navigate (seg-mode (edit-head z (lambda (t) content)))))
+(define (delete z)         (navigate (gap-mode (edit-head z (lambda (t) "")))))
 
 ;; select-seg: focus the seg-guide's segment as the head's middle, stashing the
 ;; left/right context into one crumb. carve at the current focus, then arrange the
@@ -368,19 +401,19 @@
   (define c3 (insert c2 "X"))                                  (shc "insert \"X\":" c3)
   (define c4 (delete c3))                                      (shc "delete:" c4)
 
-  ;; ===== sexp: opens-frontier summary; navigate by char OR by open paren =====
-  (printf "\n--- sexp: depth shown as d=N ---\n")
+  ;; ===== sexp: paren structure -- navigate by char / open paren, show depth ====
+  (printf "\n--- sexp: paren structure (depth d=N) ---\n")
   (define shx (show sx-chars (lambda (b) (format "   d=~a" (sx-depth b)))))
-  (define ((window field a b) l r) (+ (sgn (- a (field l))) (sgn (- b (field l)))))
   (define doc ((roper sexp) "(a (b c) d)"))
+  (define x1 (navigate ((start (axis sx-chars 4 'gap)) doc)))   (shx "char offset 4:" x1)
+  ;; re-aim onto the OPENS dimension with `with-axis`, walk it by open-paren index
+  (define x2 (navigate (with-axis (with-index x1 1) sx-opens))) (shx "inside 1st list:" x2)
+  (define x3 (navigate (with-index x2 2)))                      (shx "inside 2nd list:" x3)
 
-  ;; navigate by character offset
-  (define x1 (navigate ((start (axis sx-chars 4 'gap)) doc)))  (shx "char offset 4:" x1)
-  ;; re-aim onto the OPENS dimension with `with-guides`, then walk it by index
-  (define x2 (navigate (with-guides (with-index x1 1) (point sx-opens) (span sx-opens))))
-  (shx "inside 1st list:" x2)
-  (define x3 (navigate (with-index x2 2)))                     (shx "inside 2nd list:" x3)
-  (define x4 (insert x3 "B"))                                  (shx "insert \"B\":" x4)
-  ;; select the balanced sub-sexp at chars [3, 8) and delete it
-  (define x5 (delete (select-seg ((start (axis sx-chars 0 'gap)) doc) (window sx-chars 3 8))))
-  (shx "delete (b c):" x5))
+  ;; ===== sexp: symbol-aware -- insert absorbs into the symbol, delete removes it =
+  (printf "\n--- sexp: symbol-aware editing ---\n")
+  (define (syms i mode) (run-axis sx-atoms sx-starts-atom? sx-ends-atom? i mode))
+  (define y0 (navigate ((start (syms 1 'gap)) doc)))   (shx "before atom #1 (b):" y0)
+  (define y1 (insert y0 "B"))                          (shx "insert \"B\":" y1)
+  (define y2 (navigate (with-index y1 2)))             (shx "select atom #2 (c):" y2)
+  (define y3 (delete y2))                              (shx "delete it:" y3))
