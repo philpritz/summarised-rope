@@ -19,8 +19,9 @@
 ;; summary now folding with it.
 ;;
 ;; Factories carry an `-er`/`-r` suffix to read as "the thing that makes X":
-;; `summariser`, `roper`, `splitter`, `rope-splitter`, `seg-splitter`. Each takes
-;; its config and returns the worker function.
+;; `summariser`, `roper`. Each takes its config and returns the worker function.
+;; The rope exposes one split primitive, `bisect`; all guided navigation lives in
+;; the zipper below.
 ;;
 ;; Design notes: discussions/2026-05-29/2-claude.md.
 
@@ -31,12 +32,10 @@
  summariser
  roper
  bisect
- splitter
- rope-splitter
- seg-splitter
  ;; zipper
  start
  navigate
+ select-seg
  with-guide
  to-root
  edit-head
@@ -139,7 +138,7 @@
   (define-values (_ s e) (leaf-piece-bounds piece))
   (- e s))
 
-;; Termination guard for descent: a rope that `splitter` cannot make progress on
+;; Termination guard for descent: a rope that `bisect` cannot split further
 ;; (a leaf of length <= 1). Branches are never atomic.
 (define (atom? r)
   (and (not (branch? r)) (<= (leaf-piece-length r) 1)))
@@ -155,8 +154,8 @@
 
 ;; Bisect a non-atomic rope into its two halves: a branch into its children, a
 ;; leaf/leaf-range into two adjacent ranges over the same backing string (no
-;; copy). Precondition: (not (atom? r)). The single structural step shared by
-;; `splitter` and the zipper's `cut`.
+;; copy). Precondition: (not (atom? r)). The rope's one split primitive -- crude
+;; and guide-free; all guided descent (in the zipper) is built on it.
 (define (bisect r)
   (if (branch? r)
       (values (branch-left r) (branch-right r))
@@ -217,62 +216,6 @@
      (rope-write-text l port)
      (rope-write-text r port)]))
 
-;; ---------- splitter: one-level guided eliminator ----------
-;; Precondition: (not (atom? mr)). Does exactly one structural level: derive the
-;; two children with their contexts threaded, read the guide at the split point,
-;; dispatch to one handler. No recursion of its own. The summary is recovered
-;; from mr.
-;;
-;;   ((splitter guide on-l on-r on-here) before mr after)
-;;     guide   : left-total-summary right-total-summary -> -1 | 0 | 1
-;;     on-l    : before L after-of-L R-sibling  -> a   ; boundary in the left child
-;;     on-r    : L-sibling before-of-R R after  -> a   ; boundary in the right child
-;;     on-here : L R                            -> a   ; boundary between the children
-
-(define ((splitter guide on-l on-r on-here) before mr after)
-  (define smr (rope-algebra mr))
-  (define-values (L R) (bisect mr))
-  (case (guide (smr before L) (smr R after))
-    [(-1) (on-l before L (smr R after) R)]
-    [(1)  (on-r L (smr before L) R after)]
-    [(0)  (on-here L R)]
-    [else (error 'splitter "guide must return -1, 0, or 1")]))
-
-;; ---------- rope-splitter: partition at one boundary ----------
-;; ((rope-splitter guide) before mr after) -> (values left right)
-;; Recurses via `splitter`, reassembling the untouched sibling on the correct side.
-
-(define ((rope-splitter guide) before mr after)
-  (define smr (rope-algebra mr))
-  (define (cat . rs) (apply (roper smr) rs))
-  (let walk ([before before] [mr mr] [after after])
-    (cond
-      [(atom? mr)
-       (if (positive? (guide before (smr mr after)))
-           (values mr (empty-rope smr))
-           (values (empty-rope smr) mr))]
-      [else
-       ((splitter guide
-          (lambda (b L a R)
-            (define-values (ll lr) (walk b L a))
-            (values ll (cat lr R)))
-          (lambda (L b R a)
-            (define-values (rl rr) (walk b R a))
-            (values (cat L rl) rr))
-          (lambda (L R) (values L R)))
-        before mr after)])))
-
-;; ---------- seg-splitter: select a segment between two boundaries ----------
-;; ((seg-splitter seg-guide) before mr after) -> (values left mid right)
-;; Two rope-splitter passes: the -1 cut finds the left edge, the +1 cut the right.
-
-(define ((seg-splitter seg-guide) before mr after)
-  (define smr (rope-algebra mr))
-  (define ((bound off) sl sr) (sgn (+ (seg-guide sl sr) off)))
-  (define-values (l rest) ((rope-splitter (bound -1)) before mr after))
-  (define-values (m r)    ((rope-splitter (bound 1)) (smr before l) rest after))
-  (values l m r))
-
 ;; ============================================================================
 ;; Zipper: structured navigation and editing over a rope.
 ;;
@@ -297,38 +240,72 @@
 
 ;; ---------- helpers (operate on unpacked head / crumbs) ----------
 
-;; step: focus on `m`, with `ls`/`rs` ropes stashed either side. Returns the new
-;; head -- anchors extended by the stashed summaries -- and the crumb that undoes
-;; it, rebuilding the parent focus as roper(ls, <focus>, rs) with parent anchors
-;; restored. Empty stashes vanish under roper, so this serves all three splits.
-(define (step smr b ls m rs a)
+;; arrange: focus on `m`, with `ls`/`rs` ropes stashed either side. Returns the
+;; new head -- anchors extended by the stashed summaries -- and the `put` that
+;; undoes it, rebuilding the parent focus as roper(ls, <focus>, rs) with parent
+;; anchors restored. Empty stashes vanish under roper, so this serves all three
+;; arrangements (left / right / gap). A crumb is exactly such a put.
+(define (arrange smr b ls m rs a)
   (values (head (smr b ls) m (smr rs a))
           (lambda (h*) (head b ((roper smr) ls (head-rope h*) rs) a))))
 
-;; cut: one guided descent step on a non-atomic focus. Bisect once, read the
-;; guide at the L|R boundary, then either descend into a child (on-descend) or
-;; stop in the gap between them (on-stop). Precondition: (not (atom? (head-rope h))).
-;;   on-descend, on-stop : head crumb -> _
-(define ((cut guide) h on-descend on-stop)
+;; pick: curried over the guide. Bisect once, read the guide at the L|R boundary,
+;; and arrange the bisection accordingly -- returning the descent step
+;; (head', put). The three guide-free arrangements are inlined; nothing else
+;; names them. Precondition: (not (atom? (head-rope h))).
+(define ((pick guide) h)
   (match-define (head b t a) h)
   (define smr (rope-algebra t))
-  (define mt (empty-rope smr))
+  (define mt  (empty-rope smr))
   (define-values (L R) (bisect t))
   (case (guide (smr b L) (smr R a))
-    [(-1) (call-with-values (lambda () (step smr b mt L R a)) on-descend)]
-    [(1)  (call-with-values (lambda () (step smr b L R mt a)) on-descend)]
-    [(0)  (call-with-values (lambda () (step smr b L mt R a)) on-stop)]
-    [else (error 'cut "guide must return -1, 0, or 1")]))
+    [(-1) (arrange smr b mt L R a)]    ; split-left  : (.., L, R)
+    [(1)  (arrange smr b L R mt a)]    ; split-right : (L, R, ..)
+    [(0)  (arrange smr b L mt R a)]    ; split-gap   : (L, .., R)
+    [else (error 'pick "guide must return -1, 0, or 1")]))
 
-;; descender: drive `cut` down until the guide stops in a gap, or the focus is
-;; atomic (a single element -- can't bisect, so the focus lands *on* it). Either
-;; way the resting focus is where an edit applies. Each descent pushes a crumb.
+;; descender: step down until the focus can't split -- the guide stopped in a gap
+;; (empty focus), or it drilled to a single element (atom). Either way the
+;; resting focus is where an edit applies. Each step pushes a crumb.
 (define ((descender guide) h crumbs)
-  (if (atom? (head-rope h))
-      (values h crumbs)
-      ((cut guide) h
-        (lambda (h* c) ((descender guide) h* (cons c crumbs)))
-        (lambda (h* c) (values h* (cons c crumbs))))))
+  (define step (pick guide))
+  (let loop ([h h] [crumbs crumbs])
+    (if (atom? (head-rope h))
+        (values h crumbs)
+        (let-values ([(h* put) (step h)])
+          (loop h* (cons put crumbs))))))
+
+;; split-at: descend `t` to the exact boundary the guide marks, returning the two
+;; sides as ropes. The refined cut -- recursive bisect + guide, built only on the
+;; rope's crude `bisect`. `b`/`a` are the surrounding-context summaries.
+(define ((split-at guide) b t a)
+  (define smr (rope-algebra t))
+  (let walk ([b b] [t t] [a a])
+    (cond
+      [(atom? t)
+       (if (positive? (guide b (smr t a)))
+           (values t (empty-rope smr))
+           (values (empty-rope smr) t))]
+      [else
+       (define-values (L R) (bisect t))
+       (case (guide (smr b L) (smr R a))
+         [(-1) (let-values ([(ll lr) (walk b L (smr R a))])
+                 (values ll ((roper smr) lr R)))]
+         [(1)  (let-values ([(rl rr) (walk (smr b L) R a)])
+                 (values ((roper smr) L rl) rr))]
+         [(0)  (values L R)]
+         [else (error 'split-at "guide must return -1, 0, or 1")])])))
+
+;; carve: the segment between a seg-guide's two boundaries, as (l, m, r) ropes.
+;; Two split-at passes: the -1 cut finds the left edge, the +1 the right. A
+;; seg-guide is 5-valued -- sgn(a-left)+sgn(b-left) -- offset to a 3-valued
+;; boundary guide for each edge.
+(define ((carve seg-guide) b t a)
+  (define smr (rope-algebra t))
+  (define ((bound off) sl sr) (sgn (+ (seg-guide sl sr) off)))
+  (define-values (l rest) ((split-at (bound -1)) b t a))
+  (define-values (m r)    ((split-at (bound 1)) (smr b l) rest a))
+  (values l m r))
 
 ;; rise: pop one crumb and apply it, reconstructing the parent focus. Takes no
 ;; guide -- the repair is purely structural.
@@ -398,6 +375,18 @@
 (define (insert z content) (edit-head z (lambda (t) content)))
 (define (delete z)         (edit-head z (lambda (t) "")))
 
+;; select-seg: focus the seg-guide's segment as the head's middle, stashing the
+;; left/right context into one crumb. carve at the current focus, then arrange the
+;; three-way (a non-empty middle is a segment, an empty one a gap). The window must
+;; lie within the current focus; to-root or ascend first if it doesn't.
+(define (select-seg z seg-guide)
+  (match-define (zipper guide h crumbs) z)
+  (match-define (head b t a) h)
+  (define smr (rope-algebra t))
+  (define-values (l m r) ((carve seg-guide) b t a))
+  (let-values ([(h* put) (arrange smr b l m r a)])
+    (zipper guide h* (cons put crumbs))))
+
 ;; text: the whole document as a string, via the root focus and the print protocol.
 (define (text z) (~a (head-rope (zipper-head (to-root z)))))
 
@@ -434,43 +423,6 @@
   ;; --- same-summary guard ---
   (define sum2 (summariser string-length +))       ; a different summary instance
   (check-exn exn:fail? (lambda () (sum2 r)))        ; r was built under `sum`
-
-  ;; --- rope-splitter: cut at character position k ---
-  (define ((at k) left right)
-    (cond [(> left k) -1] [(< left k) 1] [else 0]))
-  (define e (sum ""))
-  (let-values ([(l rr) ((rope-splitter (at 3)) e r e)])
-    (check-equal? (~a l)  "abc")
-    (check-equal? (~a rr) "def"))
-  (let-values ([(l rr) ((rope-splitter (at 2)) e r e)])
-    (check-equal? (~a l)  "ab")
-    (check-equal? (~a rr) "cdef"))
-  (let-values ([(l rr) ((rope-splitter (at 0)) e r e)])
-    (check-equal? (~a l)  "")
-    (check-equal? (~a rr) "abcdef"))
-  (let-values ([(l rr) ((rope-splitter (at 6)) e r e)])
-    (check-equal? (~a l)  "abcdef")
-    (check-equal? (~a rr) ""))
-
-  ;; split on a chunked (multi-leaf) rope
-  (let-values ([(l rr) ((rope-splitter (at 5)) e r2 e)])
-    (check-equal? (~a l)  "hello")
-    (check-equal? (~a rr) " world"))
-
-  ;; --- seg-splitter: select window [a, b) by character position ---
-  ;; seg-guide returns sgn(a-left) + sgn(b-left); (bound -1)/(bound +1) cut at a/b.
-  (define ((seg a b) left right) (+ (sgn (- a left)) (sgn (- b left))))
-  (let-values ([(l m rr) ((seg-splitter (seg 2 5)) e r e)])
-    (check-equal? (~a l)  "ab")
-    (check-equal? (~a m)  "cde")
-    (check-equal? (~a rr) "f"))
-  (let-values ([(l m rr) ((seg-splitter (seg 0 6)) e r e)])  ; whole thing
-    (check-equal? (~a l)  "")
-    (check-equal? (~a m)  "abcdef")
-    (check-equal? (~a rr) ""))
-  ;; Note: an *empty* selection (a = b) is a gap, not a segment. The ±1-offset
-  ;; seg machinery has a 2-wide dead zone and cannot express a zero-width window;
-  ;; a point cursor is rope-splitter's job, not seg-splitter's.
   )
 
 ;; ---------- zipper ----------
@@ -528,4 +480,28 @@
     ;; --- empty document: the one position is a gap; insert seeds it ---
     (define ze (navigate ((start (at 0)) ((roper sum) ""))))
     (check-true   (at-gap? ze))
-    (check-equal? (text (insert ze "hi")) "hi")))
+    (check-equal? (text (insert ze "hi")) "hi")
+
+    ;; --- split-at: the refined single-boundary cut, built on bisect ---
+    (define r ((roper sum) "abcdef"))
+    (define e (sum ""))
+    (let-values ([(l rr) ((split-at (at 3)) e r e)])
+      (check-equal? (~a l) "abc")    (check-equal? (~a rr) "def"))
+    (let-values ([(l rr) ((split-at (at 0)) e r e)])
+      (check-equal? (~a l) "")       (check-equal? (~a rr) "abcdef"))
+    (let-values ([(l rr) ((split-at (at 6)) e r e)])
+      (check-equal? (~a l) "abcdef") (check-equal? (~a rr) ""))
+    (let-values ([(l rr) ((split-at (at 5)) e ((roper sum #:chunk-size 2) "hello world") e)])
+      (check-equal? (~a l) "hello")  (check-equal? (~a rr) " world"))
+
+    ;; --- carve: select a window [a, b) -- two split-at passes ---
+    (define ((seg a b) left right) (+ (sgn (- a left)) (sgn (- b left))))
+    (let-values ([(l m rr) ((carve (seg 2 5)) e r e)])
+      (check-equal? (~a l) "ab") (check-equal? (~a m) "cde") (check-equal? (~a rr) "f"))
+
+    ;; --- select-seg: focus a span; the span is the focus, delete removes it ---
+    (define zs (select-seg ((start (at 0)) ((roper sum) "abcdef")) (seg 2 5)))
+    (check-equal? (text zs) "abcdef")          ; selecting doesn't change the text
+    (check-false  (at-gap? zs))                 ; focus is the span "cde"
+    (check-equal? (text (delete zs)) "abf")     ; delete removes the span
+    (check-equal? (text (insert zs "X")) "abXf")))
