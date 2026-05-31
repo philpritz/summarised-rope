@@ -146,18 +146,20 @@ This refines *Merging to master*: the word "merge"/"master" is still needed to
 first send work to master, but amendments to the same work then stay there by
 default.
 
-## "Unless I'm mistaken, do X" is a conditional go-ahead
+## Verify the user's premises, hedged or assumed
 
-When the user attaches a hedge like "unless I'm mistaken," "if I'm right," or
-"check me" to an instruction, the hedge asks you to verify the premise first,
-then act on the result:
+When the user supplies a premise — hedged ("unless I'm mistaken," "if I'm
+right," "check me") or carried in a conditional ("if nothing else calls this
+…") — check it before acting on it or building on it:
 
-- **Premise holds** → do X, and confirm they were right.
-- **Premise is wrong** → do *not* do X. Point out what they overlooked, so the
-  mistaken step never lands.
+- **Premise holds** → proceed, and confirm they were right.
+- **Premise is wrong** → do *not* proceed on it. Point out what they
+  overlooked, so the mistaken step never lands.
 
-The hedge is the user handing you a check to run, not a formality to wave
-through.
+A confident assumption with no hedge word is still a premise to check, not a
+fact to take on faith. When the premise carries an instruction, that
+instruction is a go-ahead conditioned on it; when it's only stated, confirm or
+correct it before relying on it.
 
-Unlike a bare question (see *Questions are questions*), this *is* a go-ahead —
-just one conditioned on the premise being true.
+Unlike a bare question (see *Questions are questions*), a premise is something
+to verify and act on — just conditioned on its being true.
