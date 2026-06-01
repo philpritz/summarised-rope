@@ -154,6 +154,31 @@ what survives, so nothing in it may depend on the transcript to be understood.
   the code is fine — they're durable and a reader can follow the pointer. Leaning
   on what "we just said" is not.
 
+## Refine a draft with agents
+
+When a request to write or draft a note mentions **agents** — "write the draft and
+refine it with agents", "spawn agents to see if the ideas get across" — don't just
+write it: write it, then *test it on fresh readers and revise from what they miss*.
+The reader is a future session, exactly the audience; this is the runnable form of
+*Write for a reader who wasn't there*.
+
+The loop:
+
+- **Spawn a fresh agent** — one with no access to the current conversation; that's
+  the point. Hand it the draft, the core files it describes, and any prior notes it
+  points to. Read-only.
+- **Probe answer-free.** Ask it to reconstruct the decision and answer specific
+  questions, but never reveal the answers in the prompt. Require it to **attribute**
+  each answer to the *note*, the *code*, or its own *inference* — that split
+  separates "the note conveyed it" from "a capable reader filled it in."
+- **Read its report** (it returns to you, not the user); the gaps are wherever it
+  leaned on the code or inference, or flagged something asserted, unclear, or
+  over-claimed.
+- **Revise, then re-test with a new fresh agent** — a clean slate each round, no
+  carryover. Two or three rounds usually converge; stop when a fresh reader clears
+  it end-to-end.
+- Keep the revisions in the working tree until sign-off (the draft rule holds).
+
 ## Status sections
 
 When a discussion produces code, include a short status section that says what

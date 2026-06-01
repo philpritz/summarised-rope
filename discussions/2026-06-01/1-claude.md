@@ -10,9 +10,9 @@ enough detail to reconstruct it.
 
 **The fork.** A cursor is named by an *index*; after an edit you re-resolve it
 against the changed document and it must still point where you meant: the cursor
-stays on the seg the guide named (invariant), an insert covers exactly the typed
-text, and a delete leaves a hole a reinsert refills (delete→reinsert round-trips).
-What naming scheme survives an edit?
+stays on the place its index picks out (the invariant), an insert covers exactly
+the typed text, and a delete leaves a hole a reinsert refills (delete→reinsert
+round-trips). What naming scheme survives an edit?
 
 Running example: the document `(a (b c) d e f)`. By *tree path* `(0)` is the whole
 form and children are 1-indexed, so `(0 2)` is the second child `(b c)`, one of
@@ -30,9 +30,12 @@ value) and the right edge from the right context (counting from the end).
   five) — the from-the-left name is natural to write, its from-the-right twin is
   not, and you'd supply both for every address.
 - *Worse for structure:* a flat metric gets the right address for free, as
-  `total − n`. A structural summary doesn't — a from-the-right *path* needs a whole
-  mirror of the summary (for the sexp opens-frontier, a closes-stack read
-  right-to-left) that the author must write.
+  `total − n`. A structural summary doesn't — it is built left-to-right (the sexp
+  summary is an *opens-frontier*: a stack of the still-open parens, each tagged with
+  the forms nested in it so far). Its `combine` is associative but **not
+  commutative**, so you can't run it backwards to get a from-the-right address —
+  you'd hand-build a whole *mirror* of it, a closes-stack read right-to-left (a
+  *mirror monoid*).
 
 **B — one from-the-left coordinate, patched per edit.**
 Store a single from-the-left coordinate (a char offset `n`, or a path); on
@@ -61,30 +64,44 @@ Its extent is intrinsic (the matching close); no char offsets.
 **Chosen — frame path + a local both-ends char span: `((start end) path)`.**
 A path to a focus *frame*, then two char distances inside it — from the frame's
 start, from its end. To select `(b c)` the frame is its parent (the whole form)
-and the span is `(b c)`'s char offsets within that parent.
+and the span is `(b c)`'s char offsets within that parent. Framing it in the form
+*itself* would be self-defeating — deleting the form would destroy the very frame
+the offsets hang on, whereas the parent survives the cut, so the collapsed point
+still has a frame to sit in.
 
-- *It's A localised:* the from-the-right reference is the frame's own end, already
-  pinned cheaply by the one-sided path, so the second anchor shrinks from a global
-  from-the-right address (the mirror monoid) to one small local offset.
-- *Read, don't subtract:* get that offset by navigating to the spot and reading it
-  off the frame — not `total − start` from the document summary, which has
-  abstracted local structure away (once `(b c)` is folded into the whole, the fact
-  it held two children is gone). Localise first, then read.
-- *Payoffs:* delete collapses the two distances onto the hole (no slurp,
-  round-trips); the path keeps idea-3's interior stability; a gap is the zero-width
-  case (`start + end = frame length`).
+- *It's Basic A, localised:* the from-the-right reference is the frame's own end,
+  already pinned cheaply by the one-sided path, so the second anchor shrinks from a
+  global from-the-right address (that mirror monoid) to one small local offset.
+- *Read, don't subtract:* `total − start` is fine for a flat char count (a
+  scalar), but a structural summary isn't a number you can subtract — it's a monoid
+  value (a frontier of stacks), and folding `(b c)` into the whole has already
+  discarded the local detail (that it held two children). So global arithmetic
+  can't recover a frame-local offset: navigate to the frame and read it off the
+  frame's own anchors. Localise first, then read.
+- *Payoffs:* an edit *plants* the gap as a seg (read the right summary to fix the
+  second anchor), swaps the focus for the new content, then re-carves the
+  *unchanged* index against the new rope. Because both edges are still held,
+  insert's re-carve returns exactly the inserted span and delete's returns the
+  empty hole between them — no slurp, and delete→reinsert round-trips. The path
+  also keeps idea-3's interior stability; and since `start` is measured from the
+  frame's start and `end` from its end, a gap is the zero-width case where the two
+  distances meet: `start + end = frame length`.
 - *Convergence of all three:* idea-3's path (one-sided global addressing) carrying
   A's offsets (both-ends local anchoring).
 
-**Resilience.** The index is two layers, which is why it generalises across summaries.
+**Resilience (a design observation — the floor is built; the rest is the
+generalisation it points to).** The index is two layers:
 
-- *Positional floor:* additive distances from both ends — survives every edit and
-  always round-trips; needs only an additive metric, and text always has chars.
-- *Structural layer:* the path — stable under interior edits; under a structural
-  edit it *re-homes* from the still-valid position the floor provides.
-- *Recipe & limit:* carry the boundary fragments that rebuild the local frame's
-  extent, then read off them. Wants a tree (laminar) structure; degrades as
-  delimiters get implicit (indentation rather than parens).
+- *Positional floor* (built): additive distances from both ends — survives every
+  edit and round-trips on the tested cases (char, sexp); needs only an additive
+  metric, and text always has chars.
+- *Structural layer* (built for sexp): the path — stable under interior edits.
+  Under a structural edit that moves the frame, recovering the path from the
+  still-valid positional floor — *re-homing* — is the intended recovery, not yet
+  implemented.
+- *Recipe & limit* (conjecture): carry the boundary fragments that rebuild the
+  local frame's extent, then read off them; wants a tree (laminar) structure, and
+  degrades as delimiters get implicit (indentation rather than parens).
 
 ## Downstream decisions (consequences of the index)
 
@@ -103,18 +120,24 @@ and the span is `(b c)`'s char offsets within that parent.
 
 ## Status
 
-Pushed (`7f4e03e`); **88 tests pass**. `racket examples.rkt` runs a navigate+edit
+Pushed (`7f4e03e`); **88 tests pass** (down from the prior note's 99 — the removed
+nav/mode layer took its tests with it). `racket examples.rkt` runs a navigate+edit
 session over char and sexp (insert covers; delete leaves a gap at the hole;
 reinsert round-trips).
 
 - `zipper-core.rkt` — rewritten: `guide` struct, `point`/`copoint`/`local-span`,
   move/seg cursor, `to-seg`/`select`/`insert`/`delete`. Old nav/mode layer removed.
+  (Renames from the prior note: `nav`→`guide`, `realign-cursor`→`carve-span`.)
 - `summaries.rkt` — added `char-guide`, `sexp-guide`, `sexp-carve`,
   `sexp-form-span`; sexp summary unchanged.
 - `examples.rkt` — the demo.
 
 ## Open / parked
 
+- **Round-trip is tested, not proven.** The cover / round-trip guarantees rest on
+  `split-at` assuming each guide is monotone over offset — exercised by the tests
+  but unproven for the frontier guides (a real `runs-end` non-monotonicity bug was
+  caught once; see 05-31). Read the round-trip claims as designed-and-checked.
 - **`sx-chars-to-close` enrichment** — *parked, not rejected.* The clean "read
   `end` off the after-summary" route; the combine is intricate (context-dependent,
   needs the k-th unmatched-close position), so `end` is computed by carving the
