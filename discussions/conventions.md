@@ -111,6 +111,33 @@ Keep notes compact and durable:
 - Include small code snippets only when they capture the shape of the design.
 - Mention the concrete files affected when useful.
 
+## Record the alternatives, not only the choice
+
+A decision is half-recorded if the note says what was chosen but not what it was
+chosen *over*. The reasoning — the options weighed, why each was set aside, why
+the survivor won — is the most valuable and least recoverable part of a session;
+capture it alongside the decision, not as an afterthought.
+
+For each decision that mattered:
+
+- list the **options considered**, including ones that were attractive and only
+  narrowly lost;
+- for each one set aside, give the **specific reason** it lost — the concrete
+  cost or flaw, not just "we preferred the other";
+- say why the **chosen** option won — what it buys, and what it gives up.
+
+Distinguish **parked** (a live option merely deferred) from **rejected**
+(considered and ruled out, with a reason); both belong in the note, only their
+status differs.
+
+This is what lets a later session build on the work instead of re-deriving it:
+settled questions stay settled because the rationale is right there, and a wrong
+turn is cheap to undo — the runners-up and their reasons are already written, so
+you resume from the fork, not from scratch. Keep it proportionate, though: a
+decision turned over once needs a line or two per option, not a transcript. The
+test is whether someone arriving at the fork cold could see why it went the way
+it did.
+
 ## Status sections
 
 When a discussion produces code, include a short status section that says what
