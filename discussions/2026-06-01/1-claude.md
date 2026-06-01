@@ -8,60 +8,68 @@ enough detail to reconstruct it.
 
 ## The index (the substance)
 
-**The fork.** A cursor is addressed by an index. On an edit the cursor must stay
-the seg the guide names (the invariant), and ideally insert covers exactly the
-typed text while delete marks the hole (so delete+reinsert round-trips). What
-shape of index makes edits behave?
+**The fork.** A cursor is named by an *index*; after an edit you re-resolve it
+against the changed document and it must still point where you meant: the cursor
+stays on the seg the guide named (invariant), an insert covers exactly the typed
+text, and a delete leaves a hole a reinsert refills (delete→reinsert round-trips).
+What naming scheme survives an edit?
 
-**Basic A — pin each edge to a summary.**
-The left edge is the cut where the before-summary reaches a value; the right edge
-the cut where the after-summary reaches a value, counting from the end.
+Running example: the document `(a (b c) d e f)`. By *tree path* `(0)` is the whole
+form and children are 1-indexed, so `(0 2)` is the second child `(b c)`, one of
+five children.
 
-- *Pull:* an insert at a gap changes neither anchor (only the empty middle
-  fills), so a seg pinned left-from-before / right-from-after keeps both edges and
-  the typed text lands between them — auto-covers, no index change. (The rule:
-  name each edge from the side the edit spares.)
-- *Rejected — two-sided burden:* the from-the-left address is natural ("2nd child
-  of the 1st form"); the paired from-the-right one ("…also 5th from the end") is
-  not, and you'd need it for every address.
-- *Worse for structure:* a flat metric gets the right address for free
-  (`total − n`); a structural summary needs a whole *mirror* of the opens frontier
-  (a closes-stack read right-to-left) — a second monoid the author must write.
+**Basic A — pin each edge to the side the edit spares.**
+Name the left edge from the left context (the cut where its summary reaches a
+value) and the right edge from the right context (counting from the end).
 
-**B — one from-the-left index, patched on each edit.**
-Store a single from-the-left coordinate (char `n`, or a path); inserting `k`
-rewrites it (point `n` → span `[n, n+k]`, the delta being the inserted summary).
+- *Pull:* an insert at a gap changes neither context — only the empty middle
+  fills — so both edges hold and the typed text lands exactly between them.
+  Auto-covers, no patching.
+- *Rejected — two-sided burden:* you now need a from-the-right address for every
+  seg. Child `(b c)` is "the 2nd from the left" but "the 4th from the right" (of
+  five) — the from-the-left name is natural to write, its from-the-right twin is
+  not, and you'd supply both for every address.
+- *Worse for structure:* a flat metric gets the right address for free, as
+  `total − n`. A structural summary doesn't — a from-the-right *path* needs a whole
+  mirror of the summary (for the sexp opens-frontier, a closes-stack read
+  right-to-left) that the author must write.
 
-- *Rejected — unstable index:* every metric edit perturbs it; structural edits
-  need bookkeeping (siblings renumber, depth shifts on unbalanced input).
+**B — one from-the-left coordinate, patched per edit.**
+Store a single from-the-left coordinate (a char offset `n`, or a path); on
+inserting `k` characters at the point, rewrite point `n` → span `[n, n+k]`.
+
+- *Rejected — unstable index:* every edit perturbs it (a metric index shifts on
+  any insert; a path needs sibling renumbering), so it must be rewritten each time.
 - *A and B are one boundary in two coordinate systems,* tied by
-  `n_left + span + n_right = total` — B stores the left coord absolutely and
-  patches when `total` moves; A pins the invariant anchor and never patches.
+  `n_left + span + n_right = total`: B stores the left coordinate absolutely and
+  patches when `total` moves; A pins the invariant anchors and never patches.
 - *Corollary:* harden B against edits and it *becomes* A.
 
-**Idea 3 — a pure structural path (the prior design).**
-Address a form by its tree path, e.g. `(0 2)`; its extent is intrinsic (the
-matching close), no char offsets.
+**Idea 3 — a pure structural path** (`(0 2)`), the prior design.
+Its extent is intrinsic (the matching close); no char offsets.
 
-- *Pull:* a path is coarse — blind to length — so it's stable under interior
-  edits (typing inside a form doesn't move its path), and is one-sided and natural.
-- *Rejected for editing — the slurp:* the path's last element is a sibling index
-  (from-the-left); deleting the form renumbers later siblings, so `(0 2)` now names
-  the *next* form, and delete→reinsert can't refill the hole (it knew which number,
-  not where).
-- *It's B's fragility at the structural level.* Kept for *navigation*, where no
-  edit happens so it never bites.
+- *Pull:* a path is coarse — blind to length — so it survives interior edits
+  (typing inside a form doesn't move its path); one-sided and natural to write.
+- *Rejected for editing — the slurp:* the path's last element is a sibling index,
+  named from the left, so an edit before it changes what it means. Delete `(b c)`
+  and `(0 2)` now names `d` (what was the third child) — the selection slid onto
+  its neighbour, and delete→reinsert can't refill the hole, because the path
+  recorded *which number*, not *where*.
+- *It's B's fragility at the structural level.* Kept for navigation, where nothing
+  edits so it never bites.
 
 **Chosen — frame path + a local both-ends char span: `((start end) path)`.**
-A structural path to a *focus frame*, then within it two char distances — from the
-frame's start, from its end.
+A path to a focus *frame*, then two char distances inside it — from the frame's
+start, from its end. To select `(b c)` the frame is its parent (the whole form)
+and the span is `(b c)`'s char offsets within that parent.
 
 - *It's A localised:* the from-the-right reference is the frame's own end, already
-  pinned by the cheap one-sided path, so the second index shrinks to one local
-  offset against that end.
+  pinned cheaply by the one-sided path, so the second anchor shrinks from a global
+  from-the-right address (the mirror monoid) to one small local offset.
 - *Read, don't subtract:* get that offset by navigating to the spot and reading it
-  off the frame's anchor — `total − start` fails because the whole has abstracted
-  local structure away (a closed form's child count is gone).
+  off the frame — not `total − start` from the document summary, which has
+  abstracted local structure away (once `(b c)` is folded into the whole, the fact
+  it held two children is gone). Localise first, then read.
 - *Payoffs:* delete collapses the two distances onto the hole (no slurp,
   round-trips); the path keeps idea-3's interior stability; a gap is the zero-width
   case (`start + end = frame length`).
@@ -70,29 +78,28 @@ frame's start, from its end.
 
 **Resilience.** The index is two layers, which is why it generalises across summaries.
 
-- *Positional floor:* additive distances from both ends — survives every edit,
-  always round-trips; needs only an additive metric (text always has chars).
-- *Structural layer:* the path — stable under interior edits; *re-homes* from the
-  still-valid position under a structural edit.
-- *Recipe:* carry the boundary fragments that reconstruct the local frame's
-  extent, then read off the anchors. Wants a tree (laminar) structure; degrades as
-  delimiters get implicit (indentation).
+- *Positional floor:* additive distances from both ends — survives every edit and
+  always round-trips; needs only an additive metric, and text always has chars.
+- *Structural layer:* the path — stable under interior edits; under a structural
+  edit it *re-homes* from the still-valid position the floor provides.
+- *Recipe & limit:* carry the boundary fragments that rebuild the local frame's
+  extent, then read off them. Wants a tree (laminar) structure; degrades as
+  delimiters get implicit (indentation rather than parens).
 
 ## Downstream decisions (consequences of the index)
 
-Each had a real fork; a line apiece.
-
-- **Move/edit split.** Movement keeps a single-coordinate gap; editing plants the
-  both-ends seg. *Over* "carry the both-ends index always" (my take) — the cheap
-  coordinate need never survive an edit (every edit goes through the plant), so
-  movement shouldn't pay for the second anchor. The shape is Vim's, parameterised
-  by the summary.
-- **`to-seg` explicit, gated on the right summary.** *Over* a hidden `resolve` the
-  plant reaches (my take) — the gate is *forced* (the right edge can only come from
-  the after-summary), and it makes "becoming editable" an explicit act.
-- **Layering.** Generic machinery in `zipper-core`, concrete guides in `summaries`
-  (its only caller). *Forced* by dependency direction — `summaries` already needs
-  `zipper-core`, so the guide type can't live in `summaries` without a cycle.
+- **Move/edit split.** Movement keeps the cheap single-coordinate gap; an edit
+  first converts it to the both-ends seg (the *plant*). Chosen over carrying both
+  ends at all times — every edit goes through that conversion, so movement never
+  needs the second anchor. It's Vim's shape (roam freely, then commit to an edit),
+  parameterised by the summary.
+- **`to-seg` explicit, gated on the right summary.** The gap→seg conversion takes
+  the right summary as an argument rather than hiding inside the edit step — the
+  gate is *forced* (the right edge can only be read from the after-summary), and
+  surfacing it makes "becoming editable" deliberate.
+- **Layering.** Generic machinery in `zipper-core`, concrete guides in `summaries`.
+  Forced by dependency direction — `summaries` already requires `zipper-core`, so
+  the guide type can't live in `summaries` without an import cycle.
 
 ## Status
 
@@ -118,5 +125,7 @@ reinsert round-trips).
 
 ## Conventions
 
-Added *Record the alternatives, not only the choice* to `conventions.md`; this
-note follows it.
+Added two note-writing conventions to `conventions.md`, both followed here:
+*Record the alternatives, not only the choice*, and *Write for a reader who wasn't
+there* — a note must stand alone, decipherable from the repo without the
+conversation (the examples above were reworked to that end).

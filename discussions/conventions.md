@@ -138,6 +138,22 @@ decision turned over once needs a line or two per option, not a transcript. The
 test is whether someone arriving at the fork cold could see why it went the way
 it did.
 
+## Write for a reader who wasn't there
+
+A discussion note is a **standalone artifact** — decipherable from the repo alone,
+without the conversation that produced it. The transcript evaporates; the note is
+what survives, so nothing in it may depend on the transcript to be understood.
+
+- **Design the examples — don't transcribe the chat's.** Examples raised live are
+  chosen for the back-and-forth, not the page: ad-hoc, half-stated, tangled with
+  context, and rarely the clearest teaching case. You are positively *encouraged*
+  to rework them or invent fresh ones — pick whatever conveys the idea most cleanly
+  and elegantly. Fidelity is to the *idea*, not to the example that happened to
+  come up; a cleaner illustration you build yourself is the better record.
+- **Build on the repo, not the conversation.** Leaning on an earlier dated note or
+  the code is fine — they're durable and a reader can follow the pointer. Leaning
+  on what "we just said" is not.
+
 ## Status sections
 
 When a discussion produces code, include a short status section that says what
