@@ -10,7 +10,8 @@
 ;;             address a specific sexp node by tree path, e.g. '(0 3 2 1).
 
 (require racket/match
-         "rope-core.rkt")
+         "rope-core.rkt"
+         "zipper-core.rkt")
 
 (provide
  ;; char-count -- projection is identity
@@ -23,8 +24,10 @@
  ;; addresses (tree paths) and the moves over them
  sexp-address
  next-sexp-address previous-sexp-address parent-sexp-address
- ;; guides: the gap before / after the form at a path
- before-sexp-guide after-sexp-guide)
+ ;; boundary guides: the gap before / after the form at a path
+ before-sexp-guide after-sexp-guide
+ ;; cursor guides + the sexp selection helper
+ char-guide sexp-guide carve-form sexp-carve sexp-form-span)
 
 ;; ---------- char-count ----------
 (define char-count (summariser string-length +))
@@ -207,6 +210,57 @@
                  [(sx-ends-form? before) 0]
                  [else -1])])))
 
+;; ---------- concrete cursor guides (built on zipper-core's pieces) ----------
+;; These are the only callers of the `guide` constructor; the zipper stays
+;; summary-agnostic and just calls the faces they fill in.
+
+;; char: the char-count summary *is* the offset, so the projection is identity.
+;;   move    : a point at the char index (the gap)
+;;   resolve : read the two anchors -> the both-ends span (start end)
+;;   carve   : a flat char span over the whole document
+(define (char-guide i)
+  (guide i
+         (lambda (idx) ((point values) idx))
+         (lambda (z) (let ([h (zipper-head z)])
+                       (list (head-before h) (head-after h))))
+         (lambda (seg) (local-span values (first seg) (second seg)))))
+
+;; sexp: a seg-index is ((start end) path) -- char offsets within the form at
+;; `path` (the frame). carve descends to that frame structurally (the path gives
+;; edit-stable addressing), then carves the char span inside it (the offsets give
+;; an exact, hole-marking span). `end` is recovered here by carving the frame;
+;; reading it off an enriched right summary (sx-chars-to-close) is the alternative.
+(define (carve-form path)
+  (lambda (b t a) (carve2 (before-sexp-guide path) (after-sexp-guide path) b t a)))
+
+(define (sexp-carve seg-idx)
+  (match-define (list (list start end) path) seg-idx)
+  (lambda (b t a)
+    (define smr (rope-algebra t))
+    (define-values (lF F rF) ((carve-form path) b t a))
+    (define-values (fl m fr)
+      ((local-span sx-chars start end) (smr b lF) F (smr rF a)))
+    (values ((roper smr) lF fl) m ((roper smr) fr rF))))
+
+(define (sexp-guide)
+  (guide #f
+         (lambda (idx) (before-sexp-guide idx))   ; movement to a structural gap
+         (lambda (z) (error 'sexp-guide "plant sexp segs via select / sexp-form-span"))
+         (lambda (seg) (sexp-carve seg))))
+
+;; sexp-form-span: the seg-index selecting the form at `fpath`, framed by its
+;; parent so deleting it leaves a gap (not a slurp of the next sibling). Read off
+;; by carving the form and its parent and differencing the char offsets.
+(define (sexp-form-span doc fpath)
+  (define parent (parent-sexp-address fpath))
+  (define smr (rope-algebra doc))
+  (define e (smr ""))
+  (define-values (l form r)  ((carve-form fpath)  e doc e))
+  (define-values (lp par rp) ((carve-form parent) e doc e))
+  (list (list (- (sx-chars (smr l)) (sx-chars (smr lp)))
+              (- (sx-chars (smr r)) (sx-chars (smr rp))))
+        parent))
+
 ;; ============================================================================
 (module+ test
   (require rackunit)
@@ -232,4 +286,41 @@
   (check-equal? (previous-sexp-address '(0 3)) '(0 2))
   (check-equal? (parent-sexp-address '(0 3 2)) '(0 3))
   (check-equal? (sexp-path-compare '(0 2) '(0 3)) -1)
-  (check-equal? (sexp-path-compare '(0 3 0 0) '(0 3)) 0))    ; trailing zeros are the same boundary
+  (check-equal? (sexp-path-compare '(0 3 0 0) '(0 3)) 0)    ; trailing zeros are the same boundary
+
+  ;; --- integration: navigate + edit through the concrete guides ---
+  (define (focus z) (~a (head-rope (zipper-head z))))
+
+  ;; char: navigate to a gap and insert -- the seg covers exactly what was typed
+  (define hello ((roper char-count) "hello world"))
+  (check-equal? (focus (insert (navigate ((start (char-guide 5)) hello)) "XYZ")) "XYZ")
+  (check-equal? (text  (insert (navigate ((start (char-guide 5)) hello)) "XYZ")) "helloXYZ world")
+
+  ;; char: select a range, delete it, reinsert -- round-trips exactly
+  (define wsel (select ((start (char-guide 0)) hello) (list 6 0)))   ; "world"
+  (check-equal? (focus wsel) "world")
+  (check-equal? (text (delete wsel)) "hello ")
+  (check-equal? (text (insert (delete wsel) "world")) "hello world")
+
+  ;; sexp: select a form by its tree path
+  (define sdoc ((roper sexp) "(a (b c) d)"))
+  (define (sel p) (select ((start (sexp-guide)) sdoc) (sexp-form-span sdoc p)))
+  (check-equal? (focus (sel '(0 2)))   "(b c)")   ; child 2 of the top form
+  (check-equal? (focus (sel '(0 1)))   "a")       ; child 1
+  (check-equal? (focus (sel '(0 3)))   "d")       ; child 3
+  (check-equal? (focus (sel '(0 2 1))) "b")       ; grandchild
+
+  ;; sexp: replace a form (insert over the selection), covering the new text
+  (check-equal? (text  (insert (sel '(0 2)) "X")) "(a X d)")
+  (check-equal? (focus (insert (sel '(0 2)) "X")) "X")
+
+  ;; sexp: delete leaves a gap at the hole -- `d` is NOT slurped -- and reinsert round-trips
+  (check-equal? (text (delete (sel '(0 2)))) "(a  d)")
+  (check-equal? (text (insert (delete (sel '(0 2))) "(b c)")) "(a (b c) d)")
+
+  ;; sexp: a chunked document selects the same forms (chunk-invariance through the zipper)
+  (define sdoc2 ((roper sexp #:chunk-size 3) "(define square\n  (lambda (x)\n    (* x x)))"))
+  (define (sel2 p) (select ((start (sexp-guide)) sdoc2) (sexp-form-span sdoc2 p)))
+  (check-equal? (focus (sel2 '(0 2))) "square")
+  (check-true   (string-prefix? (focus (sel2 '(0 3))) "(lambda"))
+  (check-equal? (focus (sel2 '(0 3 2 1))) "x"))

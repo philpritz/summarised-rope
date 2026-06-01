@@ -1,46 +1,51 @@
 #lang racket
 
-;; A structural editing / navigation session over the sexp opens-frontier summary.
-;; The index is a tree PATH -- '(0) is the top-level form, children are 1-indexed
-;; inside it -- so navigation addresses real sexp nodes and the moves (parent,
-;; next/previous sibling) are just edits to that path.  Run:  racket examples.rkt
+;; A navigation + editing session over a summarised rope, through the move/edit
+;; (Vim-style) cursor: movement is a single-coordinate gap; editing *plants* a
+;; both-ends seg whose index is stable across the edit -- so an insert covers
+;; exactly what you typed and a delete leaves a gap at the hole (delete then
+;; reinsert round-trips). Run:  racket examples.rkt
 ;;
-;; Cursor inline: | a gap (point), [..] a selected form.  d=N = paren depth.
+;; Inline cursor:  | a gap,  [..] a seg (a selection, or what an edit covers).
 
 (require "rope-core.rkt" "summaries.rkt" "zipper-core.rkt")
 
-(define (show tag z)
+;; render a cursor inline; `off` projects the before-summary to a char offset.
+(define ((shower off) tag z)
   (define h     (zipper-head z))
-  (define o     (sx-chars (head-before h)))
+  (define o     (off (head-before h)))
   (define foc   (~a (head-rope h)))
   (define whole (text z))
-  (printf "~a~a   d=~a\n"
-          (~a tag #:min-width 26)
+  (printf "~a~a\n"
+          (~a tag #:min-width 22)
           (if (at-gap? z)
               (string-append (substring whole 0 o) "|" (substring whole o))
               (string-append (substring whole 0 o) "[" foc "]"
-                             (substring whole (+ o (string-length foc)))))
-          (sexp-depth (head-before h))))
+                             (substring whole (+ o (string-length foc)))))))
 
-;; a sexp nav whose index is a path
-(define (at-path p [m 'seg]) (addr-axis before-sexp-guide after-sexp-guide p m))
+;; ===== char: movement is a single coordinate; editing plants a both-ends seg =====
+(printf "--- char: move, then plant + insert (the seg covers the insert) ---\n")
+(define cshow (shower values))                       ; char-count summary IS the offset
+(define hello ((roper char-count) "hello world"))
+(cshow "navigate to 5:"  (navigate ((start (char-guide 5)) hello)))
+(cshow "insert \"XYZ\":" (insert (navigate ((start (char-guide 5)) hello)) "XYZ"))
 
-(printf "doc: (let (x 1) (+ x 2))\n\n")
-(define src ((roper sexp) "(let (x 1) (+ x 2))"))
+(printf "\n--- char: select, delete, reinsert (round-trips exactly) ---\n")
+(define wsel (select ((start (char-guide 0)) hello) (list 6 0)))   ; the range "world"
+(cshow "select \"world\":"   wsel)
+(cshow "delete:"             (delete wsel))
+(cshow "reinsert \"world\":" (insert (delete wsel) "world"))
 
-;; --- address forms directly by path ---
-(define z (navigate ((start (at-path '(0))) src)))   (show "form (0):" z)        ; whole list
-(set! z (navigate (with-index z '(0 1))))            (show "form (0 1):" z)       ; let
-(set! z (navigate (with-index z '(0 2))))            (show "form (0 2):" z)       ; (x 1)
-(set! z (navigate (with-index z '(0 2 1))))          (show "form (0 2 1):" z)     ; x
+;; ===== sexp: address forms by tree path; the seg is char-anchored within a frame =====
+(printf "\n--- sexp: select forms by path ---\n")
+(define sshow (shower sx-chars))
+(define sdoc ((roper sexp) "(a (b c) d)"))
+(define (sel p) (select ((start (sexp-guide)) sdoc) (sexp-form-span sdoc p)))
+(sshow "form (0 1):"   (sel '(0 1)))                 ; child 1   -> a
+(sshow "form (0 2):"   (sel '(0 2)))                 ; child 2   -> (b c)
+(sshow "form (0 2 1):" (sel '(0 2 1)))               ; grandchild -> b
 
-;; --- structural moves: parent / sibling are edits to the path index ---
-(set! z (navigate (move z next-sexp-address)))       (show "next sibling:" z)     ; 1
-(set! z (navigate (move z parent-sexp-address)))     (show "parent:" z)           ; (x 1)
-(set! z (navigate (move z next-sexp-address)))       (show "next sibling:" z)     ; (+ x 2)
-
-;; --- edit at a location: replace the binding's value, then delete the binding ---
-(set! z (insert (navigate (with-index z '(0 2 2))) "99"))  (show "set (0 2 2) = 99:" z)
-(set! z (delete (navigate (with-index z '(0 2)))))         (show "delete (0 2):" z)
-
-(printf "\nfinal: ~s\n" (text z))
+(printf "\n--- sexp: edit at a form -- replace, delete (no slurp), reinsert ---\n")
+(sshow "replace (0 2)=X:"  (insert (sel '(0 2)) "X"))
+(sshow "delete (0 2):"     (delete (sel '(0 2))))            ; gap at the hole, `d` not slurped
+(sshow "reinsert (b c):"   (insert (delete (sel '(0 2))) "(b c)"))
