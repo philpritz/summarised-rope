@@ -34,7 +34,8 @@
  summariser      ; (summariser measure combine) -> the variadic `summary` fn
  roper           ; (roper smr [#:chunk-size n]) -> the rope builder
  bisect          ; the one split primitive
- atom?)          ; descent termination guard (kept pending a total `bisect`)
+ atom?           ; descent termination guard (kept pending a total `bisect`)
+ tree-size)      ; char length of a node -- O(1); the zipper's smr-free empty check
 
 ;; ---------- nodes ----------
 ;; A node is a leaf (its whole text) or a branch (two subtrees). The `tree`
