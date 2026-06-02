@@ -1,180 +1,118 @@
 #lang racket
 
-;; Summarised rope, variadic-polymorphic rewrite.
+;; Summarised rope: a persistent tree of text that caches a user-defined summary
+;; at every node. Three factories make the whole surface:
 ;;
-;; Two variadic "coerce-and-fold" factories:
+;;   summary : (string | tree | summary)* -> summary   ; built by `summariser`
+;;   rope    : (string | tree)*           -> tree       ; built by `roper`
+;;   bisect  : tree -> (values tree tree)               ; the one split primitive
 ;;
-;;   summary : (string | rope | summary)* -> summary    ; built by `summariser`
-;;   roper   : (string | rope)*           -> rope        ; rope factory
+;; A node is a `leaf` (its whole text) or a `branch` (two subtrees); both inherit
+;; from `tree`, which caches what every node shares:
+;;   summary -- the cached summary value (O(1) reads)
+;;   algebra -- the summary fn it was built under, so `summary` can verify (by
+;;              eq?) that a tree's cached value belongs to the summary folding it
+;;   size    -- char length, kept automatically for balancing. Unlike `summary`
+;;              it is fixed (= string-length), never user-supplied, so it is a
+;;              plain node field -- off the summary entirely.
 ;;
-;; Ropes participate in Racket's display/write protocol (prop:custom-write),
-;; so (~a r), (format "~a" r), (display r) and (with-output-to-string ...)
-;; all yield / emit the rope's text. No bespoke rope->string in the public API.
+;; Nodes participate in Racket's display/write protocol (prop:custom-write on
+;; `tree`, inherited), so (~a r), (display r), (with-output-to-string ...) all
+;; yield/emit the text -- no bespoke rope->string.
 ;;
-;; A summary function is built by `summariser` and is the single handle threaded
-;; into rope construction (what older versions called `sys`). Threaded summary
-;; handles are bound as `smr` to keep them distinct from the canonical `summary`
-;; function. Every rope node is tagged with the summary it was built under, so
-;; `summary` can verify (by eq?) that a rope's cached value belongs to the
-;; summary now folding with it.
+;; The summary fn is the single handle threaded into construction (bound as `smr`
+;; at use sites). Building from strings needs it passed; ops on an existing tree
+;; recover it from the node via `tree-algebra`.
 ;;
-;; Factories carry an `-er`/`-r` suffix to read as "the thing that makes X":
-;; `summariser`, `roper`. Each takes its config and returns the worker function.
-;; A pure, guide-free rope library: make, summarise, split (`bisect`), join
-;; (`roper`), display. All guided navigation lives in `zipper-core.rkt`, built on
-;; these primitives.
+;; A pure rope library: make, summarise, split (`bisect`), join (`roper`),
+;; display. Guided navigation lives in `zipper-core.rkt`, built on these.
 ;;
-;; Design notes: discussions/2026-05-29/2-claude.md.
-
-(require racket/match)
+;; Design notes: discussions/2026-05-29/2-claude.md (the variadic surface),
+;; discussions/2026-06-01/1-claude.md (the cleanup this file is the rewrite of).
 
 (provide
- ;; the rope API
- summariser
- roper
- bisect
- ;; structural primitives the zipper builds on
- rope-algebra
- atom?
- empty-rope
- empty-rope?)
+ summariser      ; (summariser measure combine) -> the variadic `summary` fn
+ roper           ; (roper smr [#:chunk-size n]) -> the rope builder
+ bisect          ; the one split primitive
+ atom?)          ; descent termination guard (kept pending a total `bisect`)
 
 ;; ---------- nodes ----------
-;; Each node caches its summary value AND the summary fn it was built under.
-;; `rope-summary` reads the cached value; `rope-algebra` reads the fn.
-
-(struct leaf (text summary algebra)
-  #:transparent
-  #:property prop:custom-write
-  (lambda (r port mode) (rope-write-text r port)))
-
-(struct leaf-range (text start end summary algebra)
-  #:transparent
-  #:property prop:custom-write
-  (lambda (r port mode) (rope-write-text r port)))
-
-(struct branch (left right summary algebra)
-  #:transparent
-  #:property prop:custom-write
-  (lambda (r port mode) (rope-write-text r port)))
-
-(define (rope? v) (or (leaf? v) (leaf-range? v) (branch? v)))
-
-(define (rope-summary r)
-  (match r
-    [(leaf _ s _)           s]
-    [(leaf-range _ _ _ s _) s]
-    [(branch _ _ s _)       s]))
-
-(define (rope-algebra r)
-  (match r
-    [(leaf _ _ a)           a]
-    [(leaf-range _ _ _ _ a) a]
-    [(branch _ _ _ a)       a]))
+;; A node is a leaf (its whole text) or a branch (two subtrees). The `tree`
+;; parent caches the summary value, the summary fn it was built under, and char
+;; size; the inherited accessors tree-summary / tree-algebra / tree-size read any
+;; node, and prop:custom-write is inherited too.
+(struct tree (summary algebra size) #:transparent
+  #:property prop:custom-write (lambda (r port mode) (rope-write-text r port)))
+(struct leaf   tree (text)       #:transparent)   ; ctor: (leaf summary algebra size text)
+(struct branch tree (left right) #:transparent)
 
 ;; ---------- summariser ----------
-;; (summariser measure combine) -> the variadic `summary` fn, the single handle
-;; threaded into rope construction.
-;;
-;;   (summary str)         = (measure str)
-;;   (summary a b c ...)   = combine, folded left-to-right (order matters; a
-;;                           monoid is associative but not commutative)
-;;
-;; Arguments interleave: strings are measured, ropes contribute their cached
-;; summary (guarded same-summary), summaries pass through. Identity is
-;; (summary "") -- no separate empty (relies on measure being a homomorphism).
-
+;; (summariser measure combine) -> the variadic `summary` fn.
+;;   (summary str)        = (measure str)
+;;   (summary a b c ...)  = combine, folded left-to-right (associative, not
+;;                          commutative -- order is preserved)
+;; Strings are measured, trees contribute their cached summary (same-algebra
+;; guarded), summary values pass through. Identity is (summary "") -- no separate
+;; empty (measure is a monoid homomorphism). Knows nothing of `size`.
 (define (summariser measure combine)
   (define (summary . parts)
     (define (->s x)
       (cond
         [(string? x) (measure x)]
-        [(rope? x)
-         (if (eq? (rope-algebra x) summary)
-             (rope-summary x)
+        [(tree? x)
+         (if (eq? (tree-algebra x) summary)
+             (tree-summary x)
              (error 'summary
-                    "rope was summarised under a different summary; reconstruction unsupported"))]
-        [else x]))
-    (when (null? parts)
-      (error 'summary "needs at least one argument"))
+                    "tree was summarised under a different summary; reconstruction unsupported"))]
+        [else x]))                              ; already a summary value
+    (when (null? parts) (error 'summary "needs at least one argument"))
     (foldl (lambda (x acc) (combine acc (->s x)))
            (->s (car parts))
            (cdr parts)))
   summary)
 
-;; ---------- leaf / piece helpers (internal) ----------
-
+;; ---------- construction ----------
+;; leaf-rope / branch-rope stamp the cached summary and size. empty-rope is the
+;; canonical empty leaf -- the only representable empty, since concat drops
+;; empties before branching, so a branch is never empty.
 (define ((leaf-rope smr) text)
-  (leaf text (smr text) smr))
+  (leaf (smr text) smr (string-length text) text))
+(define ((branch-rope smr) l r)
+  (branch (smr l r) smr (+ (tree-size l) (tree-size r)) l r))
+(define (empty-rope smr) (leaf (smr "") smr 0 ""))
+(define (empty-rope? r)  (and (leaf? r) (zero? (tree-size r))))
 
-(define (make-leaf-range smr text start end)
-  (if (= start end)
-      (empty-rope smr)
-      (leaf-range text start end (smr (substring text start end)) smr)))
+;; ---------- split ----------
+;; atom?: a node `bisect` cannot split further (a leaf of size <= 1). Branches
+;; are never atomic. The descent termination guard.
+(define (atom? r) (and (leaf? r) (<= (tree-size r) 1)))
 
-(define (empty-rope smr)
-  (leaf "" (smr "") smr))
+;; Split a leaf (size >= 2) at its char midpoint into two leaves. A half's
+;; summary can't be derived from the whole (combine has no inverse), so it is
+;; re-measured -- which substrings anyway, so the halves are plain copies.
+(define (split-leaf lf)
+  (define smr  (tree-algebra lf))
+  (define text (leaf-text lf))
+  (define mid  (quotient (string-length text) 2))
+  (values ((leaf-rope smr) (substring text 0 mid))
+          ((leaf-rope smr) (substring text mid))))
 
-(define (empty-rope? r)
-  (and (leaf? r) (string=? "" (leaf-text r))))
-
-(define (piece-text piece)
-  (match piece
-    [(leaf text _ _)           text]
-    [(leaf-range text s e _ _) (substring text s e)]))
-
-(define (leaf-piece-bounds piece)
-  (match piece
-    [(leaf text _ _)           (values text 0 (string-length text))]
-    [(leaf-range text s e _ _) (values text s e)]))
-
-(define (leaf-piece-length piece)
-  (define-values (_ s e) (leaf-piece-bounds piece))
-  (- e s))
-
-;; Termination guard for descent: a rope that `bisect` cannot split further
-;; (a leaf of length <= 1). Branches are never atomic.
-(define (atom? r)
-  (and (not (branch? r)) (<= (leaf-piece-length r) 1)))
-
-;; Bisect a non-atomic leaf/leaf-range into two ranges over the same backing
-;; string (no copy). The summary is recovered from the piece.
-(define (split-leaf-piece piece)
-  (define smr (rope-algebra piece))
-  (define-values (text start end) (leaf-piece-bounds piece))
-  (define mid (+ start (quotient (- end start) 2)))
-  (values (make-leaf-range smr text start mid)
-          (make-leaf-range smr text mid end)))
-
-;; Bisect a non-atomic rope into its two halves: a branch into its children, a
-;; leaf/leaf-range into two adjacent ranges over the same backing string (no
-;; copy). Precondition: (not (atom? r)). The rope's one split primitive -- crude
-;; and guide-free; all guided descent (in the zipper) is built on it.
+;; Bisect a non-atomic node into two halves: a branch into its children, a leaf
+;; into two adjacent pieces. The one split primitive -- crude and guide-free; all
+;; guided descent (in the zipper) builds on it. Precondition: (not (atom? r)).
 (define (bisect r)
   (if (branch? r)
       (values (branch-left r) (branch-right r))
-      (split-leaf-piece r)))
+      (split-leaf r)))
 
-;; Two adjacent ranges of the same backing string re-fuse into one leaf.
-(define (leaf-compatible? l r)
-  (and (leaf-range? l) (leaf-range? r)
-       (eq? (leaf-range-text l) (leaf-range-text r))
-       (= (leaf-range-end l) (leaf-range-start r))))
-
-;; ---------- branch / concat (internal) ----------
-
-(define ((branch-rope smr) l r)
-  (branch l r (smr l r) smr))
-
-;; Smart joiner: drops empties, re-fuses adjacent compatible ranges, else
-;; branches. This is the rope "rise"/join step.
+;; ---------- join ----------
+;; Smart joiner: drops empties, else branches (with leaf-range gone there are no
+;; adjacent views to re-fuse). The rope "rise"/join step.
 (define ((concat-rope smr) . ropes)
   (foldr (lambda (l r)
            (cond
              [(empty-rope? l) r]
              [(empty-rope? r) l]
-             [(leaf-compatible? l r)
-              ((leaf-rope smr) (string-append (piece-text l) (piece-text r)))]
              [else ((branch-rope smr) l r)]))
          (empty-rope smr)
          ropes))
@@ -184,11 +122,9 @@
     (substring text start (min (string-length text) (+ start n)))))
 
 ;; ---------- roper (rope factory) ----------
-;; ((roper smr [#:chunk-size n]) . parts) assembles strings (chunked into
-;; leaves) and ropes (passed through) by a dumb concat fold. Subsumes the old
-;; string->rope (chunk + assemble) and concat-rope (all-ropes case). Balancing
-;; is deferred -- the fold is a right-leaning spine for now.
-
+;; ((roper smr [#:chunk-size n]) . parts) assembles strings (chunked into leaves)
+;; and trees (passed through) by a dumb concat fold. Balancing is deferred -- the
+;; fold is a right-leaning spine for now.
 (define ((roper smr #:chunk-size [chunk 1024]) . parts)
   (define (->rope x)
     (if (string? x)
@@ -196,41 +132,36 @@
         x))
   (apply (concat-rope smr) (map ->rope parts)))
 
-;; ---------- read ----------
-;; Internal walk used by the prop:custom-write handler on each node type.
-;; Writes leaf bytes straight to the port; leaf-range avoids substring's copy by
-;; passing its bounds to write-string. (~a r), (format "~a" r), (display r), and
-;; (with-output-to-string (lambda () (display r))) all route through this.
-
+;; ---------- display ----------
+;; The walk behind prop:custom-write on `tree`. (~a r), (display r), and
+;; (with-output-to-string (lambda () (display r))) all route through here.
 (define (rope-write-text r port)
-  (match r
-    [(leaf text _ _)           (write-string text port)]
-    [(leaf-range text s e _ _) (write-string text port s e)]
-    [(branch l r _ _)
-     (rope-write-text l port)
-     (rope-write-text r port)]))
+  (cond
+    [(leaf? r)   (write-string (leaf-text r) port)]
+    [(branch? r) (rope-write-text (branch-left r) port)
+                 (rope-write-text (branch-right r) port)]))
 
 ;; ============================================================================
 (module+ test
   (require rackunit)
 
-  ;; A trivial summary: summary = character count.
+  ;; A trivial summary: character count.
   (define sum (summariser string-length +))
 
   ;; --- build & read ---
   (define r ((roper sum) "abcdef"))
   (check-equal? (~a r) "abcdef")
-  (check-equal? (sum r) 6)                         ; rope coerced -> cached summary
+  (check-equal? (sum r) 6)                          ; tree coerced -> cached summary
 
   ;; chunked build still round-trips and summarises
   (define r2 ((roper sum #:chunk-size 2) "hello world"))
   (check-equal? (~a r2) "hello world")
   (check-equal? (sum r2) 11)
 
-  ;; --- interleaving strings / ropes / summaries ---
+  ;; --- interleaving strings / trees / summaries ---
   (check-equal? (sum "ab" r "x") (+ 2 6 1))
-  (check-equal? (sum 5 r)        (+ 5 6))          ; a summary value (number) passes through
-  (check-equal? (sum "")         0)                ; identity = (summary "")
+  (check-equal? (sum 5 r)        (+ 5 6))           ; a summary value passes through
+  (check-equal? (sum "")         0)                 ; identity = (summary "")
 
   ;; assembling mixed parts into a rope
   (define joined ((roper sum) "(" r ")"))
@@ -238,6 +169,16 @@
   (check-equal? (sum joined) 8)
 
   ;; --- same-summary guard ---
-  (define sum2 (summariser string-length +))       ; a different summary instance
-  (check-exn exn:fail? (lambda () (sum2 r)))        ; r was built under `sum`
-  )
+  (define sum2 (summariser string-length +))        ; a different summary instance
+  (check-exn exn:fail? (lambda () (sum2 r)))         ; r was built under `sum`
+
+  ;; --- bisect round-trips text and bottoms out at atoms ---
+  (define-values (l rr) (bisect r))
+  (check-equal? (string-append (~a l) (~a rr)) "abcdef")
+  (check-true  (atom? ((roper sum) "x")))            ; size 1
+  (check-true  (atom? ((roper sum) "")))             ; size 0
+  (check-false (atom? r))                            ; size 6
+
+  ;; --- size is tracked on every node, off the summary ---
+  (check-equal? (tree-size r)  6)
+  (check-equal? (tree-size r2) 11))
