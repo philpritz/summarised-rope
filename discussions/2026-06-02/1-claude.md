@@ -54,9 +54,10 @@ Decisions, each with what it beat:
 - The **variadic coerce-and-fold** summariser is unchanged (the 2026-05-29 trial,
   retained).
 
-**Consequence:** `zipper-core.rkt` and `summaries.rkt` no longer build — they
-import the dropped exports. The fix is the `smr`-threading migration below; the
-rope stands alone (its own tests pass).
+**Consequence:** the old `zipper-core.rkt` / `summaries.rkt` / `examples.rkt`
+(which import the dropped exports) are **deprecated to `deprecated-4/`** — the
+active tree is the new rope alone, a blank slate. They are rewritten from scratch
+next session, not migrated; the rope stands alone (its own tests pass).
 
 ## Balancing (designed, parked)
 
@@ -133,7 +134,8 @@ chosen *over* a packaged `machine` struct — it matches how the old
 
 - **Rope:** rewritten, 184 lines, 16 tests pass standalone — ready to promote.
 - **Balancing:** designed, parked; only the `size` field landed.
-- **Zipper:** design only; `zipper-core.rkt` / `summaries.rkt` need the
-  `smr`-threading migration to build again. **Next session:** rewrite the zipper as
-  the stack machine above (`descend`/`rise`/`over` + `lens` + `search`/`ascend`/
-  `navigate`), threading `smr`, then fold the balancing work back in.
+- **Zipper:** design only; the old zipper/summaries are **deprecated to
+  `deprecated-4/`** — blank slate. **Next session:** write the new zipper (and
+  summaries) from scratch as the stack machine above (`descend`/`rise`/`over` +
+  `lens` + `search`/`ascend`/`navigate`), threading `smr`, then fold the balancing
+  work back in.

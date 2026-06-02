@@ -1,20 +1,24 @@
 # deprecated-4
 
-Snapshot of `rope-core.rkt` as it stood before the 2026-06-02 cleanup rewrite,
-kept for reference — specifically so its size can be compared against the rewrite.
+The whole pre-rewrite generation, kept as reference — the **Claude-written**
+mock-up flagged in `discussions/2026-06-01/1-claude.md` ("a mock-up, to be cleaned
+up and rewritten"), designed collaboratively but written by Claude and reviewed
+only at the design level. The 2026-06-02 cleanup kept only the rewritten
+`rope-core.rkt` in the active tree and moved everything else here; the zipper and
+summaries are rewritten from scratch next session (the stack-machine direction in
+`discussions/2026-06-02/1-claude.md`).
 
-This is the **Claude-written** rope library: designed collaboratively, but written
-by Claude and reviewed only at the design level, never combed through line by line
-— flagged as "a mock-up, to be cleaned up and rewritten later" in
-`discussions/2026-06-01/1-claude.md`. The current cleanup does exactly that: combs
-through it and rewrites it. This copy preserves the pre-rewrite version to diff
-against.
+Self-contained — the four files build together against the old rope (their
+relative `require`s resolve within this folder).
 
-- `rope-core.rkt` — the variadic summary rope: `summariser` / `roper` / `bisect`,
-  the `leaf` / `leaf-range` / `branch` structs, and the `rope-algebra` / `atom?` /
-  `empty-rope` / `empty-rope?` structural exports. **243 lines** — the size baseline.
+- `rope-core.rkt` — the old variadic summary rope (`summariser` / `roper` /
+  `bisect`, the `leaf` / `leaf-range` / `branch` structs, the `rope-algebra` /
+  `atom?` / `empty-rope` / `empty-rope?` exports). **243 lines** — the size
+  baseline for the rewrite.
+- `zipper-core.rkt` — the old crumb/guide zipper (the move/seg cursor, the
+  `pick` / `descender` descent). To be rewritten as a stack machine.
+- `summaries.rkt` — the old char + sexp-frontier guides.
+- `examples.rkt` — the old navigate+edit demo.
 
-The rewrite (on `claude/2026-05-30/zipper-impl`) prunes the public surface to
-`{summary, rope, bisect}`, folds the nodes under a `tree` parent, drops
-`leaf-range`, and adds a per-node `size` field for balancing. Compare against the
-live `rope-core.rkt`.
+For the rope's size reduction, compare `rope-core.rkt` here (243 lines) against the
+active one (184).
