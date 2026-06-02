@@ -1,6 +1,12 @@
 # 001 — Mark/span heads, guides, and editing algebra
 
-These notes capture the current design conversation for continuing work in Codex. They are intentionally provisional.
+> **Deprecated — kept for history only.** This is the project's earliest design
+> sketch, in the "mark/span" vocabulary and written for an earlier (Codex)
+> workflow. The design has moved on substantially since — current direction
+> lives in the `discussions/` notes (see the most recent dates). Read this only
+> as background, not as the live design.
+
+~~These notes capture the current design conversation for continuing work in Codex.~~ They are intentionally provisional.
 
 This file lives under `design-notes/` so future sessions can add separate numbered notes and later synthesize them.
 
