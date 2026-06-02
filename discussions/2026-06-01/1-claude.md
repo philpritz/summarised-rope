@@ -3,8 +3,8 @@
 Reworked the zipper's *editing* model and pushed it (`7f4e03e`) on
 `claude/2026-05-30/zipper-impl`. The whole session was really one decision — the
 shape of the *index* — plus its downstream consequences. Design-led by the user;
-Claude wrote the code and the lower-level choices. Each option is carried in
-enough detail to reconstruct it.
+Claude wrote the code and the lower-level choices — a mock-up, to be cleaned up
+and rewritten later. Each option is carried in enough detail to reconstruct it.
 
 ## The index (the substance)
 
