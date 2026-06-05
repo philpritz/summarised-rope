@@ -92,6 +92,7 @@ write it into a file (conventions, notes, code) only after the user signs off.
   it by default unless you think of a serious objection, in which case we'll
   discuss. If the "maybe" carries a question ("…what do you think?"), that's
   soliciting an opinion (see *Questions are questions*), don't apply.
+- "Draft" means in chat.
 
 So drafting is the collaborative mode; an explicit "add this" is not.
 

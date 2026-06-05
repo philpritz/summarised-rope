@@ -3,9 +3,9 @@
 ;; Summarised rope: a persistent tree of text that caches a user-defined summary
 ;; at every node. Three factories make the whole surface:
 ;;
-;;   smr     : (string | tree | summary)* -> summary   ; built by `summary`
-;;   rope    : smr -> ((string | tree)* -> tree)        ; the rope factory (rebalances)
-;;   bisect  : tree -> (values tree tree)               ; the one split primitive
+;;   smr        : (string | tree | summary)* -> summary  ; built by `make-summary`
+;;   make-rope  : smr -> ((string | tree)* -> tree)      ; the rope factory (rebalances)
+;;   bisect     : tree -> (values tree tree)             ; the one split primitive
 ;;
 ;; A node is a `leaf` (its whole text) or a `branch` (two subtrees); both inherit
 ;; from `tree`, which caches what every node shares:
@@ -26,19 +26,19 @@
 ;; at use sites). Building from strings needs it passed; ops on an existing tree
 ;; recover it from the node via `tree-algebra`.
 ;;
-;; A pure rope library: make, summarise, split (`bisect`), join (`rope`),
+;; A pure rope library: make, summarise, split (`bisect`), join (`make-rope`),
 ;; display. Guided navigation lives in `zipper-core.rkt`, built on these.
 ;;
 ;; Design notes: discussions/2026-05-29/2-claude.md (the variadic surface),
 ;; discussions/2026-06-01/1-claude.md (the cleanup this file is the rewrite of).
 
 (provide
- summary         ; (summary string-summary combine) -> smr, the variadic summary fn
- rope            ; (rope smr [#:chunk-size n]) -> the rope builder (fuses, rebalances)
- bisect)         ; the one split primitive (rough-borrowing; good-enough? optional)
+ make-summary  ; (make-summary string-summary combine) -> smr, the variadic summary fn
+ make-rope     ; (make-rope smr [#:chunk-size n]) -> the rope builder (fuses, rebalances)
+ bisect)       ; the one split primitive (rough-borrowing; good-enough? optional)
 ;; everything else is internal: leaf-rope/branch-rope/empty-rope, concat-rope, split-leaf,
 ;; tree-size/tree-height, within-ratio, rebalance, pathological?/log2, chunk-string,
-;; rope-write-text. Emptiness is (equal? x ((rope smr))): the empty branch is
+;; rope-write-text. Emptiness is (equal? x ((make-rope smr))): the empty branch is
 ;; unconstructable (branch guard), so the only size-0 rope is the canonical empty leaf.
 
 ;; ---------- nodes ----------
@@ -62,15 +62,15 @@
 (define max-leaf 1024)
 
 ;; ---------- summary ----------
-;; (summary string-summary combine) -> smr, the variadic summary fn.
-;;   (smr)            = (string-summary "")   ; the empty/identity, like ((rope smr))
+;; (make-summary string-summary combine) -> smr, the variadic summary fn.
+;;   (smr)            = (string-summary "")   ; the empty/identity, like ((make-rope smr))
 ;;   (smr str)        = (string-summary str)
 ;;   (smr a b c ...)  = combine, folded left-to-right (associative, not
 ;;                      commutative -- order is preserved)
 ;; Strings are measured, trees contribute their cached summary (same-algebra
 ;; guarded), summary values pass through. Identity is (smr "") -- no separate
 ;; empty (string-summary is a monoid homomorphism). Knows nothing of `size`.
-(define (summary string-summary combine)
+(define (make-summary string-summary combine)
   (define (smr . parts)
     (define (->s x)
       (cond
@@ -190,10 +190,10 @@
     (substring text start (min (string-length text) (+ start n)))))
 
 ;; ---------- rope (factory) ----------
-;; ((rope smr [#:chunk-size n]) . parts) assembles strings (chunked into leaves) and
+;; ((make-rope smr [#:chunk-size n]) . parts) assembles strings (chunked into leaves) and
 ;; trees (passed through) by a dumb concat fold, then `rebalance`s the result if it
 ;; came out pathologically tall (a fresh load folds to a right-leaning spine).
-(define ((rope smr #:chunk-size [chunk max-leaf]) . parts)
+(define ((make-rope smr #:chunk-size [chunk max-leaf]) . parts)
   (define (->rope x)
     (if (string? x)
         (apply (concat-rope smr) (map (leaf-rope smr) (chunk-string x chunk)))
@@ -215,7 +215,7 @@
   (require rackunit)
 
   ;; A trivial summary: character count.
-  (define sum (summary string-length +))
+  (define sum (make-summary string-length +))
 
   ;; an explicit right-leaning spine of one-char leaves -- bypasses concat's fuse, so
   ;; bisect/rebalance get a genuinely unbalanced tree to chew on.
@@ -226,12 +226,12 @@
           ((branch-rope sum) ((leaf-rope sum) (string (car cs))) (loop (cdr cs))))))
 
   ;; --- build & read ---
-  (define r ((rope sum) "abcdef"))
+  (define r ((make-rope sum) "abcdef"))
   (check-equal? (~a r) "abcdef")
   (check-equal? (sum r) 6)                          ; tree coerced -> cached summary
 
   ;; chunked build still round-trips and summarises
-  (define r2 ((rope sum #:chunk-size 2) "hello world"))
+  (define r2 ((make-rope sum #:chunk-size 2) "hello world"))
   (check-equal? (~a r2) "hello world")
   (check-equal? (sum r2) 11)
 
@@ -239,15 +239,15 @@
   (check-equal? (sum "ab" r "x") (+ 2 6 1))
   (check-equal? (sum 5 r)        (+ 5 6))           ; a summary value passes through
   (check-equal? (sum "")         0)                 ; identity = (smr "")
-  (check-equal? (sum)            0)                 ; (smr) = (string-summary "") -- empty, like ((rope smr))
+  (check-equal? (sum)            0)                 ; (smr) = (string-summary "") -- empty, like ((make-rope smr))
 
   ;; assembling mixed parts into a rope
-  (define joined ((rope sum) "(" r ")"))
+  (define joined ((make-rope sum) "(" r ")"))
   (check-equal? (~a joined) "(abcdef)")
   (check-equal? (sum joined) 8)
 
   ;; --- same-summary guard ---
-  (define sum2 (summary string-length +))            ; a different summary instance
+  (define sum2 (make-summary string-length +))            ; a different summary instance
   (check-exn exn:fail? (lambda () (sum2 r)))         ; r was built under `sum`
 
   ;; --- bisect round-trips text ---
@@ -255,15 +255,15 @@
   (check-equal? (string-append (~a l) (~a rr)) "abcdef")
 
   ;; --- bisect is total: the empty rope splits into two empties ---
-  (let-values ([(a b) (bisect ((rope sum)))])
-    (check-true (equal? a ((rope sum))))
-    (check-true (equal? b ((rope sum)))))
+  (let-values ([(a b) (bisect ((make-rope sum)))])
+    (check-true (equal? a ((make-rope sum))))
+    (check-true (equal? b ((make-rope sum)))))
 
   ;; --- suppose an empty IS produced (bisecting an atom): concat reabsorbs it, never
   ;;     branching it -- the empty-drop runs before any branch in `join` ---
-  (let-values ([(lh rh) (bisect ((rope sum) "x"))])   ; an atom -> one half is empty
+  (let-values ([(lh rh) (bisect ((make-rope sum) "x"))])   ; an atom -> one half is empty
     (check-equal? (~a ((concat-rope sum) lh rh)) "x"))
-  (let ([e ((rope sum))] [ab ((rope sum) "ab")])
+  (let ([e ((make-rope sum))] [ab ((make-rope sum) "ab")])
     (check-true   (equal? ((concat-rope sum) e e) e))     ; empties only -> empty
     (check-equal? (~a ((concat-rope sum) e ab e)) "ab"))  ; empties around content -> dropped
 
@@ -274,7 +274,7 @@
                     (+ (* 3 (min (tree-size sl) (tree-size sr))) 1))))
 
   ;; --- rope rebalances a load that folds to a pathological spine ---
-  (define big ((rope sum) (make-string 65536 #\x)))   ; 64 max-leaf chunks -> a tall spine
+  (define big ((make-rope sum) (make-string 65536 #\x)))   ; 64 max-leaf chunks -> a tall spine
   (check-equal? (~a big) (make-string 65536 #\x))                  ; content intact
   (check-false (pathological? big))                               ; came out balanced, not a spine
 
@@ -286,14 +286,14 @@
     (check-equal?  (~a b) "abcdefghijklmnop"))        ; content preserved
 
   ;; --- concat fuses small adjacent leaves into one ---
-  (let ([j ((concat-rope sum) ((rope sum) "ab") ((rope sum) "cd"))])
+  (let ([j ((concat-rope sum) ((make-rope sum) "ab") ((make-rope sum) "cd"))])
     (check-true   (leaf? j))                                          ; one leaf, not a branch
     (check-equal? (~a j) "abcd"))
 
   ;; --- seam-fuse: a small remainder split across a big subtree recombines (not scatters) ---
   (let* ([lf   (leaf-rope sum)]
          [br   (branch-rope sum)]
-         [tree ((rope sum) (make-string 3000 #\z))]                   ; a real multi-leaf tree
+         [tree ((make-rope sum) (make-string 3000 #\z))]                   ; a real multi-leaf tree
          [frag (br (lf "c") (br tree (lf "d")))]                      ; "c" stranded at the tree's left
          [whole ((concat-rope sum) (lf "ab") frag)])
     (define (leftmost t) (if (leaf? t) t (leftmost (branch-left t))))
@@ -301,7 +301,7 @@
     (check-equal? (leaf-text (leftmost whole)) "abc"))                          ; "ab"+"c" fused
 
   ;; --- a chunk-1 build coalesces into max-leaf leaves, not a spine of singletons ---
-  (let ([t ((rope sum #:chunk-size 1) (make-string 3000 #\a))])
+  (let ([t ((make-rope sum #:chunk-size 1) (make-string 3000 #\a))])
     (define (leaf-count t) (if (leaf? t) 1 (+ (leaf-count (branch-left t)) (leaf-count (branch-right t)))))
     (check-equal? (~a t) (make-string 3000 #\a))
     (check-true   (<= (leaf-count t) 8)))                            ; ~3 leaves, not 3000
