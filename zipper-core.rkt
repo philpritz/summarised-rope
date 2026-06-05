@@ -16,7 +16,7 @@
 ;; A guide is a callable (left-total right-total) -> sign. A *gap* guide returns
 ;; -1 | 0 | 1 -- where the target boundary sits relative to the cursor. `smr` (the
 ;; summary fn) rides alongside the guide as a fixed parameter the caller already
-;; holds (it built the rope with `(roper smr)`), seeded at `start`.
+;; holds (it built the rope with `(rope smr)`), seeded at `start`.
 ;;
 ;; `descend` is a carry binary search. It brackets the focus by its two boundary
 ;; reads -- L = before|rope, R = rope|after -- and stops the instant either reads
@@ -30,7 +30,7 @@
 ;; (`carve`) are designed but not built here yet (see the discussion notes).
 
 (require racket/match
-         "rope-core.rkt")          ; summariser roper bisect atom? tree-size
+         "rope-core.rkt")          ; summary rope bisect
 
 (provide
  (struct-out head)
@@ -41,17 +41,18 @@
 ;; A focus: a sub-rope plus the summaries bracketing it in the whole document.
 (struct head (before rope after) #:transparent)
 
-(define (empty smr) ((roper smr)))      ; the canonical empty rope
+(define (empty smr) ((rope smr)))      ; the canonical empty rope
 
-;; gap?: the focus is empty. O(1), smr-free, via the cached size field.
-(define (gap? h) (zero? (tree-size (head-rope h))))
+;; gap?: the focus is empty -- i.e. equal to the canonical empty rope. (The empty
+;; branch is unconstructable in rope-core, so the only empty is that one leaf.)
+(define (gap? smr h) (equal? (head-rope h) (empty smr)))
 
 ;; arrange: focus `m`, stashing ropes `ls`/`rs` either side. Returns the new head
 ;; (anchors extended by the stashed summaries) and the `put` that undoes it -- a
 ;; crumb is exactly such a put, and it closes over smr (so rise/over need none).
 (define (arrange smr b ls m rs a)
   (values (head (smr b ls) m (smr rs a))
-          (lambda (h*) (head b ((roper smr) ls (head-rope h*) rs) a))))
+          (lambda (h*) (head b ((rope smr) ls (head-rope h*) rs) a))))
 
 ;; rise: pop one crumb and apply it, reconstructing the parent focus.
 (define (rise h k) (values ((car k) h) (cdr k)))
@@ -107,17 +108,17 @@
 ;; projection is the identity. `point i` marks the gap at offset i.
 (module+ test
   (require rackunit)
-  (define cc (summariser string-length +))
+  (define cc (summary string-length +))
   (define ((point i) l r) (cond [(> l i) -1] [(< l i) 1] [else 0]))
-  (define (mk s)  ((roper cc) s))
-  (define (mk2 s) ((roper cc #:chunk-size 2) s))     ; multi-leaf
+  (define (mk s)  ((rope cc) s))
+  (define (mk2 s) ((rope cc #:chunk-size 2) s))     ; multi-leaf
   (define (doc-text h k) (let-values ([(rh _) (to-root h k)]) (~a (head-rope rh))))
 
   ;; --- movement lands in a gap and preserves the text, at every offset ---
   (for ([i (in-range 0 12)])
     (define-values (h0 k0) (start cc (mk "hello world")))
     (define-values (h k) ((navigate (point i) cc) h0 k0))
-    (check-true  (gap? h)                       (format "gap at ~a" i))
+    (check-true  (gap? cc h)                    (format "gap at ~a" i))
     (check-equal? (doc-text h k) "hello world"  (format "text at ~a" i)))
 
   ;; --- insert at a gap via `over` ---
@@ -125,7 +126,7 @@
     (define-values (h0 k0) (start cc src))
     (define-values (h k) ((navigate (point i) cc) h0 k0))
     (define-values (h2 k2)
-      ((over (lambda (hd) (head (head-before hd) ((roper cc) content) (head-after hd)))) h k))
+      ((over (lambda (hd) (head (head-before hd) ((rope cc) content) (head-after hd)))) h k))
     (doc-text h2 k2))
   (check-equal? (insert-at 5 "XYZ" (mk "hello world")) "helloXYZ world")
   (check-equal? (insert-at 0 "Q"   (mk "abc"))          "Qabc")
@@ -135,7 +136,7 @@
   ;; --- a chunked, multi-leaf rope behaves identically ---
   (let*-values ([(h0 k0) (start cc (mk2 "hello world"))]
                 [(h k)   ((navigate (point 5) cc) h0 k0)])
-    (check-true   (gap? h))
+    (check-true   (gap? cc h))
     (check-equal? (doc-text h k) "hello world"))
   (check-equal? (insert-at 5 ", " (mk2 "hello world")) "hello,  world")
 
@@ -144,6 +145,6 @@
                 [(q1 qk1) ((navigate (point 8) cc) q0 qk0)]
                 [(q2 qk2) ((navigate (point 2) cc) q1 qk1)])
     (check-true   (> (length qk1) 1))            ; the settle left a real stack to ascend
-    (check-true   (gap? q2))
+    (check-true   (gap? cc q2))
     (check-equal? (head-before q2) 2)            ; landed exactly at offset 2
     (check-equal? (doc-text q2 qk2) "hello world")))
