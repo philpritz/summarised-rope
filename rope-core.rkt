@@ -37,7 +37,7 @@
  make-rope     ; (make-rope smr [#:chunk-size n]) -> the rope builder (fuses, rebalances)
  bisect)       ; the one split primitive (rough-borrowing; good-enough? optional)
 ;; everything else is internal: leaf-rope/branch-rope/empty-rope, concat-rope, split-leaf,
-;; tree-size/tree-height, within-ratio, rebalance, pathological?/log2, chunk-string,
+;; tree-size/tree-height, within-ratio, rebalance, pathological?, chunk-string,
 ;; rope-write-text. Emptiness is (equal? x ((make-rope smr))): the empty branch is
 ;; unconstructable (branch guard), so the only size-0 rope is the canonical empty leaf.
 
@@ -157,9 +157,8 @@
 ;; pathological?: height too tall for weight -- the scapegoat trigger. C=3 sits just
 ;; above the ~2.41 a ratio-3 tree guarantees (1/log2(4/3)), leaving the lazy heal
 ;; slack before a rebuild is forced; K=2 is constant slack for small trees.
-(define (log2 n) (/ (log n) (log 2)))
 (define (pathological? t)
-  (> (tree-height t) (+ (* 3 (log2 (add1 (tree-size t)))) 2)))
+  (> (tree-height t) (+ (* 3 (log (add1 (tree-size t)) 2)) 2)))
 
 ;; ---------- join ----------
 ;; concat-rope: variadic join, folding the binary `join`. `join` drops empties,
