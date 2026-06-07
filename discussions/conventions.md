@@ -93,6 +93,8 @@ write it into a file (conventions, notes, code) only after the user signs off.
   discuss. If the "maybe" carries a question ("…what do you think?"), that's
   soliciting an opinion (see *Questions are questions*), don't apply.
 - "Draft" means in chat.
+- But a request to **push** (or otherwise land it) alongside the draft overrides the
+  chat-first default: write it and push, no separate sign-off round.
 
 So drafting is the collaborative mode; an explicit "add this" is not.
 
