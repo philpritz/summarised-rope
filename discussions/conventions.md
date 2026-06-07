@@ -95,6 +95,9 @@ write it into a file (conventions, notes, code) only after the user signs off.
 - "Draft" means in chat.
 - But a request to **push** (or otherwise land it) alongside the draft overrides the
   chat-first default: write it and push, no separate sign-off round.
+- Land work — write to a file, commit, or push — only when the user's own words
+  ask for it ("write up", "add it", "push"), or confirm an assistant's offer with
+  "go ahead". A revision request or a hook prompt is never sign-off.
 
 So drafting is the collaborative mode; an explicit "add this" is not.
 
