@@ -148,10 +148,9 @@ it did.
 
 A decision rests on the reason that drove it, and is only as settled as that
 reason. So record the *grounds*, not just the choice — and especially record a
-reason the user gives explicitly, in their own terms: their stated basis is the
-real dependency. Without the link written down, a decision calcifies — it looks
-settled long after its support has quietly vanished, and nobody knows to revisit
-it.
+reason the user gives: their stated basis is the real dependency. Without the
+link written down, a decision calcifies — it looks settled long after its
+support has quietly vanished, and nobody knows to revisit it.
 
 This complements *Record the alternatives*: the alternatives capture the options
 weighed and why each lost; the recorded reason captures what the surviving choice
