@@ -5,7 +5,7 @@
 ;;
 ;;   smr        : (string | tree | summary)* -> summary  ; built by `make-summary`
 ;;   make-rope  : smr -> ((string | tree)* -> tree)      ; the rope factory (rebalances)
-;;   bisect     : tree -> (values tree tree)             ; the one split primitive
+;;   multisect  : guides -> (tree -> piece values)       ; the one split primitive
 ;;
 ;; A node is a `leaf` (its whole text) or a `branch` (two subtrees); both inherit
 ;; from `tree`, which caches what every node shares:
@@ -26,7 +26,7 @@
 ;; at use sites). Building from strings needs it passed; ops on an existing tree
 ;; recover it from the node via `tree-algebra`.
 ;;
-;; A pure rope library: make, summarise, split (`bisect`), join (`make-rope`),
+;; A pure rope library: make, summarise, split (`multisect`), join (`make-rope`),
 ;; display. Guided navigation lives in `zipper-core.rkt`, built on these.
 ;;
 ;; Design notes: discussions/2026-05-29/2-claude.md (the variadic surface),
@@ -35,11 +35,13 @@
 (provide
  make-summary  ; (make-summary string-summary combine) -> smr, the variadic summary fn
  make-rope     ; (make-rope smr [#:chunk-size n]) -> the rope builder (fuses, rebalances)
- bisect)       ; the one split primitive (rough-borrowing; good-enough? optional)
-;; everything else is internal: leaf-rope/branch-rope/empty-rope, concat-rope, split-leaf,
-;; tree-size/tree-height, within-ratio, rebalance, pathological?, chunk-string,
-;; rope-write-text. Emptiness is (equal? x ((make-rope smr))): the empty branch is
-;; unconstructable (branch guard), so the only size-0 rope is the canonical empty leaf.
+ multisect     ; (multisect [guides]) -> splitter: t -> n+1 pieces as values; none -> balance halve
+ frame)        ; ((frame smr b a) g) -> g with the outer context baked in
+;; everything else is internal: leaf?/leaf-rope/branch-rope/empty-rope, concat-rope,
+;; bisect, bisect-guided, split-leaf, split-leaf-at, tree-size/tree-height, within-ratio,
+;; rebalance, pathological?, chunk-string, rope-write-text. Emptiness is
+;; (equal? x ((make-rope smr))): the empty branch is unconstructable (branch guard), so
+;; the only size-0 rope is the canonical empty leaf.
 
 ;; ---------- nodes ----------
 ;; A node is a leaf (its whole text) or a branch (two subtrees). The `tree`
@@ -72,18 +74,18 @@
 ;; empty (string-summary is a monoid homomorphism). Knows nothing of `size`.
 (define (make-summary string-summary combine)
   (define (smr . parts)
-    (define (->s x)
-      (cond
-        [(string? x) (string-summary x)]
-        [(tree? x)
-         (if (eq? (tree-algebra x) smr)
-             (tree-summary x)
-             (error 'smr
-                    "tree was summarised under a different summary; reconstruction unsupported"))]
-        [else x]))                              ; already a summary value
-    (foldl (lambda (x acc) (combine acc (->s x)))
-           (string-summary "")
-           parts))
+    (for/fold ([acc (string-summary "")])
+              ([x (in-list parts)])
+      (combine
+       acc
+       (cond
+         [(string? x) (string-summary x)]
+         [(tree? x)
+          (if (eq? (tree-algebra x) smr)
+              (tree-summary x)
+              (error 'smr
+                     "tree was summarised under a different summary; reconstruction unsupported"))]
+         [else x]))))                           ; already a summary value
   smr)
 
 ;; ---------- construction ----------
@@ -98,7 +100,6 @@
           (add1 (max (tree-height l) (tree-height r)))
           l r))
 (define (empty-rope smr) (leaf (smr "") smr 0 0 ""))
-(define (empty-rope? r)  (and (leaf? r) (zero? (tree-size r))))
 
 ;; ---------- split ----------
 ;; Split a leaf (size >= 2) at its char midpoint into two leaves. A half's
@@ -144,6 +145,59 @@
              (loop (branch-left l) (br (branch-right l) r))]
             [else (values l r)])))))                            ; coarse boundary -- accept rough split
 
+;; A guide g : (L R) -> {-1,0,1} reads the FULL totals around a cut: +1 when the
+;; boundary g names is RIGHT of the cut, -1 LEFT, 0 at it.  That stays true on a
+;; sub-rope by framing: ((frame smr b a) g) is g with the outer context baked in --
+;; the framed guide reads within-rope totals, g itself still sees full totals.
+(define ((frame smr b a) g)
+  (lambda (l r) (g (smr b l) (smr r a))))
+
+;; Guided split: cut t at the boundary g names -- descend the boundary edge reading g
+;; at each seam, threading the within-node accumulation, and split the straddling
+;; leaf at the exact char.  l ++ r = t throughout.
+(define (bisect-guided t g)
+  (let ([smr (tree-algebra t)])
+    (let descend ([b (smr "")] [t t] [a (smr "")])
+      (match t
+        [(? leaf?) (split-leaf-at smr b t a g)]
+        [(branch _ _ _ _ l r)
+         (match (g (smr b l) (smr r a))                            ; read the guide at the seam
+           [ 1 (let-values ([(rl rr) (descend (smr b l) r a)])     ; boundary right of seam -> cut in r
+                 (values ((concat-rope smr) l rl) rr))]
+           [-1 (let-values ([(ll lr) (descend b l (smr r a))])     ; boundary left  of seam -> cut in l
+                 (values ll ((concat-rope smr) lr r)))]
+           [ 0 (values l r)])]))))                                 ; boundary exactly at the seam
+
+;; split a leaf at the char where g flips: smallest i with (g L R) <= 0 (binary search;
+;; g is monotone non-increasing in i, since growing the cut moves the boundary from
+;; right to left).
+(define (split-leaf-at smr b lf a g)
+  (let* ([s    (leaf-text lf)]
+         [sign (lambda (i) (g (smr b (substring s 0 i)) (smr (substring s i) a)))]
+         [cut  (let search ([lo 0] [hi (string-length s)])
+                 (if (>= lo hi)
+                     lo
+                     (let ([mid (quotient (+ lo hi) 2)])
+                       (if (positive? (sign mid)) (search (add1 mid) hi) (search lo mid)))))])
+    (values ((leaf-rope smr) (substring s 0 cut))
+            ((leaf-rope smr) (substring s cut)))))
+
+;; (multisect [guides]): guides (a vector of boundary guides) -> splitter.
+;; ((multisect guides) t) cuts t at each guide's boundary left to right and returns
+;; the n+1 pieces as values (p0 ++ ... ++ pn = t).  Guides read totals over t;
+;; `frame` them if t sits in context.  NO guides -- (multisect) or #() -- is the
+;; balance halve (`bisect`): two good-enough?, rough-borrowed halves -- an atom
+;; halves to itself and an empty, on whichever side.
+(define ((multisect [guides #()]) t)
+  (let ([smr (tree-algebra t)])
+    (if (zero? (vector-length guides))
+        (bisect t)                                        ; the balance halve
+        (for/fold ([rest t] [bAcc (smr "")] [pieces '()]
+                   #:result (apply values (reverse (cons rest pieces))))
+                  ([g (in-vector guides)])
+          (let-values ([(l r) (bisect-guided rest ((frame smr bAcc (smr "")) g))])
+            (values r (smr bAcc l) (cons l pieces)))))))
+
 ;; rebalance: rebuild t to a tighter balance by recursively bisecting with the
 ;; stricter `rebuild-ratio?`. Leaves are reused (never bisected); only branches are
 ;; rebuilt -- O(leaves * log) -- so it resets accumulated shape debt. The pathology
@@ -168,21 +222,24 @@
 ;; (< max-leaf) -- the bounded leaf tip that splitting leaves -- and stops at any real
 ;; subtree, so it stays O(1)-ish, never O(depth). Balance-dumb: shape is bisect's job.
 (define ((concat-rope smr) . ropes)
-  (define (fuse l r) ((leaf-rope smr) (string-append (leaf-text l) (leaf-text r))))
-  (define (join l r)
-    (cond
-      [(empty-rope? l) r]
-      [(empty-rope? r) l]
-      [(and (leaf? l) (leaf? r))
-       (if (<= (+ (tree-size l) (tree-size r)) max-leaf)
-           (fuse l r)
-           ((branch-rope smr) l r))]
-      [(and (branch? l) (< (tree-size (branch-right l)) max-leaf))   ; small right tip of l
-       ((branch-rope smr) (branch-left l) (join (branch-right l) r))]
-      [(and (branch? r) (< (tree-size (branch-left r)) max-leaf))    ; small left tip of r
-       ((branch-rope smr) (join l (branch-left r)) (branch-right r))]
-      [else ((branch-rope smr) l r)]))
-  (foldr join (empty-rope smr) ropes))
+  (letrec ([mt   (empty-rope smr)]
+           [br   (branch-rope smr)]
+           [fuse (lambda (l r) ((leaf-rope smr) (string-append (leaf-text l) (leaf-text r))))]
+           [join (match-lambda**
+                  [((== mt) r) r]                                   ; empties drop
+                  [(l (== mt)) l]
+                  [((? leaf? l) (? leaf? r))                        ; two leaves at the seam:
+                   (if (<= (+ (tree-size l) (tree-size r)) max-leaf)
+                       (fuse l r)                                   ;   fuse if they fit,
+                       (br l r))]                                   ;   else branch
+                  [((branch _ _ _ _ ll lr) r)                       ; small right tip of l
+                   #:when (< (tree-size lr) max-leaf)
+                   (br ll (join lr r))]
+                  [(l (branch _ _ _ _ rl rr))                       ; small left tip of r
+                   #:when (< (tree-size rl) max-leaf)
+                   (br (join l rl) rr)]
+                  [(l r) (br l r)])])
+    (foldr join mt ropes)))
 
 (define (chunk-string text n)
   (for/list ([start (in-range 0 (string-length text) n)])
