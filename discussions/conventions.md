@@ -134,7 +134,9 @@ For each decision that mattered:
 
 Distinguish **parked** (a live option merely deferred) from **rejected**
 (considered and ruled out, with a reason); both belong in the note, only their
-status differs.
+status differs. A third, opposite disposition: **dropped** — a choice adopted
+then reversed, or whose premise later vanished. Unlike parked and rejected, it
+and its reasons need not be recorded.
 
 This is what lets a later session build on the work instead of re-deriving it:
 settled questions stay settled because the rationale is right there, and a wrong
@@ -146,15 +148,36 @@ it did.
 
 ## Record the reason as a dependency
 
-A decision rests on the reason that drove it, and is only as settled as that
-reason. So record the *grounds*, not just the choice — and especially record a
-reason the user gives: their stated basis is the real dependency. Without the
-link written down, a decision calcifies — it looks settled long after its
-support has quietly vanished, and nobody knows to revisit it.
+A decision is only as settled as the reason that drove it, so record the grounds,
+not just the choice — especially a reason the user gives, which is the real
+dependency. Without it written down, a choice calcifies: it looks settled long
+after its support has vanished.
 
-This complements *Record the alternatives*: the alternatives capture the options
-weighed and why each lost; the recorded reason captures what the surviving choice
-actually depends on.
+**Prefer the user's stated reason, and the one they state first.** They usually
+mark it — "if …", "since …", "so that …", "only … if …"; that clause *is* the
+dependency, recorded in their terms. When several are given, the initial / most
+emphatic one is load-bearing and must be captured; don't swap in a tidier reason
+of your own, even if yours is also true. (A "maybe" or "I think" may hedge the
+decision's feasibility, its downstream consequences, or the reason itself — use
+discretion to decide between them, and record accordingly.)
+
+**Don't fabricate reasons.** A reason supplied where none was given reads to the
+next reader as a real constraint, falsely stiffening the design and narrowing
+where it can still move. Record only reasons actually given or genuinely
+operative; leave a choice unattributed rather than invent grounds.
+
+## Space is proportional to the fork, not the work
+
+A note's length tracks the weight of the ideas decided, not the hours spent. Long-term
+directions, major forks, and their losing alternatives are what a later session cannot
+recover from the repo — give them the space. Low-level decisions — implementation
+shapes, argument orders, naming, code style — are recoverable by reading the files, so
+they get proportionally less: anything from a passing gloss ("a style pass over
+rope-core") to a line or two of colour, as feels right. There is no duty to itemise
+routine work — the diff is its own record.
+
+- The test: at each line, would a reader need the note to understand the choice, or
+  would the code answer them? Spend the note's space on what only the note can say.
 
 ## Write for a reader who wasn't there
 
