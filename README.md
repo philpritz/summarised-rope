@@ -1,135 +1,121 @@
-# Summarised Rope Zipper Core
+# Summarised Rope
 
-This project is an experimental Racket core for a persistent summarised rope with
-an editor-facing zipper.
-
-```text
-rope   = persistent summarised tree storage
-zipper = cursor and main interface into the text
-```
-
-The current code lives in:
-
-- `zipper-core.rkt`: rope storage, zipper navigation, guide search, cursor views,
-  and basic insertion.
-- `summary-algebras.rkt`: example summary algebras and guides, including text
-  positions and S-expression navigation.
-- `deprecated/`: older locator-based work kept for reference only.
-
-## Zipper View
-
-A zipper stores the current gap and the summary context around it:
-
-```racket
-(struct zipper (sys left right before-summary after-summary crumbs) ...)
-```
-
-Conceptually:
+An experimental Racket core for editing structured text over a persistent
+summarised rope: a rope whose nodes carry a monoid summary, navigated and edited
+through a guide-driven zipper, with S-expressions as the worked structure.
 
 ```text
-before-summary | left ^ right | after-summary
+rope-core.rkt     persistent summarised rope; the split primitive
+sexp-summary.rkt  the sexp summary algebra (signed frontier)
+zipper-core.rkt   the cursor machine; guide-agnostic
+sexp-edit.rkt     spine indexes, anchors, re-basing, re-anchoring
 ```
 
-There are two public summary views:
+`design-notes/` and `discussions/` hold the rationale (dated, decision-level);
+`deprecated*/` are earlier generations kept for reference; `future/` parked
+directions.
 
-```racket
-(gap-summary z k) ; before left right after
-(gap-sides z k)   ; left-total right-total
-```
+## The pieces
 
-`gap-sides` is the guide-facing view:
+### rope-core
 
-```text
-left-total  = before-summary + left-summary
-right-total = right-summary + after-summary
-```
+`make-summary` builds a summary algebra; `make-rope` builds (and concatenates)
+ropes, coercing strings. `multisect` is the one split export: `(multisect
+guides)` is a splitter cutting the rope at each guide's boundary — n guides give
+n+1 pieces as values; no guides is the balance halve. `frame` bakes outer
+context into a guide.
 
-## Guides
+### sexp-summary
 
-A guide is a plain function:
+A string summarises to a signed frontier: `opens` — one `+(k+1)` per unclosed
+open, innermost-first — `closes` (`−(k+1)`), `forms` (completed forms), and the
+seam flags (`starts/ends-atom?`, `starts/ends-form?`). The combine is
+associative (battery-tested across chunkings), so summaries merge across any
+split. Counting is by completion: a frame counts on its enclosing level at its
+`)`, which makes spine comparison naively lexicographic.
 
-```racket
-left-total-summary right-total-summary -> -1 | 0 | 1
-```
+### zipper-core
 
-Navigation is built from guides:
+The cursor machine, agnostic about what guides mean. A zipper is a head
+(`before-summary · focus-rope · after-summary`), a crumb stack, and its
+installed guides. A guide is a comparator `(L R) -> {-1,0,1}` (`+1` = the
+target boundary is right of the cut); a cursor is a 2-guide vector `(start
+end)`; a gap is `start = end` (empty focus), a seg is `start < end`.
 
-```racket
-((navigate guide) z)
-((search guide) z)
-```
+Surface — five names:
 
-`navigate` can shift outward and then search inward. `search` is local to the
-current gap neighborhood.
+- `start` — a zipper over a rope, no guides installed yet.
+- `guide` — the three-faced accessor on the installed pair: `(guide z)` reads;
+  `((guide gs) z)` installs a 2-vector; `((guide f) z)` installs `(f current)`.
+- `replace` — the one editing verb: swap the focus for new content. `delete` is
+  `(replace "")`; insert is replace at a gap.
+- `to-root` — fold the crumbs back into the whole document.
+- `peek` — `(values before focus after)`.
 
-## S-expression Addresses
+The invariant: **every write re-navigates**. Installing guides moves the cursor
+to where they point; `replace` swaps the focus and then re-navigates with the
+installed guides on the new text. All writes funnel through one internal mover,
+so composed accessors built over `guide` inherit the invariant — one
+re-navigation per write, at the outermost face.
 
-The S-expression summary supports structural cursor addresses. Addresses are
-slot/gap addresses, not node indexes.
+## Indexes, anchors, flipping
 
-```text
-^expr          => '(0)
-^expr          => '(0 0 0) ; same start boundary by zero padding
-(^define ...)  => '(0 1)
-(define ^...)  => '(0 2)
-```
+An index is a **spine**: the per-level slot list, innermost-first, read straight
+off the frontier. The head's sign picks the **family**: a *front* index
+(non-negative) is derived only from the text to its left; a *back* index
+(components ≤ −1) only from the text to its right. Both name the same position
+on the present text; under edits each follows its own side. `fine@` reads both
+spines at a cut; `slot-guide` turns an index into a guide, sign-dispatched;
+`cursor` navigates a fresh zipper to one or two indexes.
 
-Guide makers are named with a `-guide` suffix:
+At every cut and level `front − back = N+2`, so the per-level differences — the
+`moduli` — interconvert the families as arithmetic: `base-left`, `base-right`,
+`flip` (an involution). The moduli are exactly what one index alone cannot know;
+`edge-moduli` reads them at a cursor edge, where `anchors` reads both spines.
 
-```racket
-before-sexp-guide : address -> guide
-after-sexp-guide  : address -> guide
-```
-
-Address transformers are named with an `-address` suffix:
-
-```racket
-next-sexp-address     : address -> address
-previous-sexp-address : address -> address
-parent-sexp-address   : address -> address
-```
-
-Relative navigation freezes the current address, transforms it, builds a guide,
-and then navigates:
-
-```racket
-((relative-sexp after-sexp-guide) z)
-
-((relative-sexp (compose before-sexp-guide next-sexp-address)) z)
-
-((relative-sexp (compose before-sexp-guide parent-sexp-address)) z)
-```
+**Re-anchoring** is the flip as a cursor operation: `(re-anchor z i side)`
+re-derives edge `i`'s guide from the chosen side's anchor and installs it
+through `guide`'s modify face. `(cover z)` flips the second guide onto its
+right anchor: the start then reads only the text before the seg, the end only
+the text after, so an edit between them touches neither — the cursor keeps
+covering whatever replaces the focus, across replace, delete, and insert, and
+the operation is idempotent.
 
 ## Example
 
 ```racket
-(require "zipper-core.rkt"
-         "summary-algebras.rkt")
+(require "sexp-edit.rkt")
 
-(define sys (system sexp-frontier-algebra))
-(define source "(define square\n  (lambda (x)\n    (* x x)))\n(+ 1 2)")
-(define rope ((string->rope sys) source #:chunk-size 3))
-(define z0 ((start sys) rope))
+(define text "(aa (p q) cc)")
+(define-values (^q _)                       ; front spine at the cut before q
+  (fine@ (sexp (substring text 0 7)) (sexp (substring text 7))))
 
-(define before-name
-  ((navigate (before-sexp-guide '(0 2))) z0))
+(define z  (cover (cursor ((make-rope sexp) text) ^q)))   ; covered gap at ^q
+(define z1 ((replace "x ") z))
+(~a (focus z1))             ; "x"  with its trailing space -- the cursor covers it
+(~a (focus (to-root z1)))   ; "(aa (p x q) cc)"
 
-before-name
+(define z2 ((replace "x y ") z1))           ; verbs chain through the cursor
+(~a (focus (to-root z2)))   ; "(aa (p x y q) cc)" -- q held its ground
 ```
 
-The zipper has a custom writer, so evaluating it prints:
+## Domain and open edges
 
-```text
-cursor-left:  "(define " ^
-cursor-right: "square\n  (lambda (x)\n    (* x x)))\n(+ 1 2)"
-left-total-summary:  '(#f #t () 0 (1) #f #f) ^
-right-total-summary: '(#t #t (2) 1 () #f #t)
-```
+- Targets land exactly on **form starts** — the only integer spine heads. The
+  end slot of a frame (the gap before a `)`) is not addressable: its fractional
+  read collides with the mid-atom read of the preceding atom (see
+  `discussions/2026-06-10`); end-based anchors are parked.
+- Segs are half-open `[start, start)` — the end index is the start of what
+  follows.
+- Spine address arithmetic (next/prev/parent as index operations) is
+  undesigned.
+- Edits straddling a cursor edge are outside the covering protocol — re-cursor
+  for those.
 
-## Running Tests
+## Running tests
 
 ```powershell
-& "C:\Program Files\Racket\raco.exe" test .\zipper-core.rkt
-& "C:\Program Files\Racket\raco.exe" test .\summary-algebras.rkt
-& "C:\Program Files\Racket\raco.exe" test .\tests\current-api-test.rkt
+& "C:\Program Files\Racket\raco.exe" test .\rope-core.rkt .\sexp-summary.rkt .\zipper-core.rkt .\sexp-edit.rkt
 ```
+
+455 tests as of 2026-06-11.

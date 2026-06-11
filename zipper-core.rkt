@@ -8,18 +8,27 @@
 ;;   config -> smr -> ((head stack) -> (values head stack))
 ;;
 ;; and (zipper-lift op ...) hands each op the zipper's own smr, composes them (rightmost
-;; runs first, like compose), and reseals the run into a zipper.  The machine ops:
+;; runs first, like compose), NAVIGATES with the installed guides, and reseals the run
+;; into a zipper -- every lifted run lands with the cursor standing where the guides
+;; point on the new state.  The machine ops:
 ;;
-;;   ascend   rise (pop+apply crumbs) until the focus contains the whole segment
-;;   descend  strip whole subtrees (balance halve + guide reads) to the minimal node
-;;   carve    cut the focus EXACTLY at the boundaries (`multisect`), middle piece -> focus
-;;   navigate = (zipper-lift carve descend ascend)
+;;   ascend    rise (pop+apply crumbs) until the focus contains the whole segment
+;;   descend   strip whole subtrees (balance halve + guide reads) to the minimal node
+;;   carve     cut the focus EXACTLY at the boundaries (`multisect`), middle -> focus
+;;   navigate  = carve . descend . ascend as ONE op -- the lift's permanent last op
 ;;
-;; A guide is a comparator (L R) -> {-1,0,1}: +1 if the target boundary is right of the cut,
-;; -1 left, 0 at it.  A cursor is a 2-guide vector (start end); a gap is start = end (an empty
-;; focus), a seg is start < end.  Editing verbs are ops over the focus (`over*` and friends),
-;; lifted the same way -- ((replace content) z) -> z -- and `to-root` folds the crumbs back
-;; into the whole document, so an edit is: navigate, replace, to-root.
+;; A guide is a comparator (L R) -> {-1,0,1}: +1 if the target boundary is right of the
+;; cut, -1 left, 0 at it.  A cursor is a 2-guide vector (start end); a gap is start = end
+;; (an empty focus), a seg is start < end.
+;;
+;; The surface is two three-faced accessors and the lifecycle pair:
+;;   guide   read | install | modify the cursor    -- moving
+;;   focus   read | swap | transform the content   -- editing
+;;   start / to-root                                -- in, home
+;; Both accessors' write faces go through the lift, so EVERY WRITE NAVIGATES; delete is
+;; ((focus "") z), insert is a swap at a gap, and edits chain by composition.  An index
+;; swap (an anchor flip) and a guide swap (a move) are the same operation.  `to-root` is
+;; deliberately outside the lift: homing must not navigate back down; guides survive it.
 ;;
 ;; zipper-core is guide-AGNOSTIC: it only ever calls a guide, never names its kind.  Structural
 ;; guides (sexp, char, ...) live in their own files.
@@ -28,10 +37,10 @@
          srfi/26                ; cut  -- (cut <> smr) feeds ops their smr; (cut zipper ...) reseals
          "rope-core.rkt")       ; make-summary make-rope multisect frame
 
-(provide start navigate to-root      ; lifecycle: in, move, home
-         replace insert              ; editing verbs (config -> zipper -> zipper)
-         delete                      ; the empty replace, pre-configured (zipper -> zipper)
-         peek)                       ; read-out: (peek z) -> (values before focus after)
+(provide start to-root               ; lifecycle: in, home
+         guide                       ; the navigation accessor: read | install | modify
+         focus                       ; the editing accessor: read | swap | transform
+         on-edges)                   ; the two edge cuts, spread over f g, combined by c
 
 ;; ---------- focus ----------
 (struct head (before rope after) #:transparent)
@@ -48,7 +57,7 @@
           (lambda (h*) (head b ((make-rope smr) ls (head-rope h*) rs) a))))
 
 ;; ---------- machine ----------
-(define (rise h k) (values ((car k) h) (cdr k)))        ; pop a crumb, apply it
+(define (rise h k) (values ((car k) h) (cdr k)))        ; one step: pop a crumb, apply it
 
 ;; contains?: does the focus bracket the whole segment?  start watches the left edge, end the right.
 (define (((contains? guides) smr) h)
@@ -101,52 +110,100 @@
   (let-values ([(h* c) ((lens smr) (multisect (vector-map (frame smr b a) guides)) h)])
     (values h* (cons c k))))
 
-;; ---------- machine verbs ----------
-;; over* is the one focus-toucher: it runs f on the focus rope, anchors and stack
-;; untouched (so the edit is safe).  replace* just configures it.
-(define (((over* f) smr) h k)
-  (match-let ([(head b m a) h])
-    (values (head b (f m) a) k)))
-
-(define ((replace* content) smr)
-  ((over* (const ((make-rope smr) content))) smr))   ; make-rope coerces string | rope
-
-;; to-root*: fold every crumb back into the head; the focus becomes the whole document.
-(define ((to-root* smr) h k)
-  (values (foldl (lambda (crumb h) (crumb h)) h k) '()))
+;; navigate: the navigation pipeline as ONE op -- ascend, then descend, then carve.
+(define ((navigate guides) smr)
+  (compose ((carve guides) smr) ((descend guides) smr) ((ascend guides) smr)))
 
 ;; ---------- public zipper ----------
-(struct zipper (head stack smr) #:transparent)
+;; prop:custom-write: a zipper prints as its document with the cursor marked
+;; (see zipper-show below), like ropes print as their text.
+(struct zipper (head stack smr guides) #:transparent
+  #:property prop:custom-write (lambda (z port mode) (zipper-show z port)))
 
-(define (start smr rope) (zipper (head (smr "") rope (smr "")) '() smr))
+(define (start smr rope) (zipper (head (smr "") rope (smr "")) '() smr #f))
 
-;; zipper-lift: hand each op the zipper's own smr, compose (rightmost runs first), reseal.
-;; The one place a zipper is opened; `start` and the accessors below are the only others
-;; that touch its insides.
+;; zipper-lift: hand each op the zipper's own smr, compose (rightmost runs first)
+;; with `navigate` as the permanent last op, reseal.  Every write funnels through
+;; the lift, so every write lands with the cursor standing where the installed
+;; guides point on the new state; (zipper-lift) with no ops is plain re-navigation.
 (define ((zipper-lift . ops) z)
-  (match-define (zipper h k smr) z)
-  ((apply compose (cut zipper <> <> smr)
-          (map (cut <> smr) ops))
+  (match-define (zipper h k smr gs) z)
+  ((apply compose (cut zipper <> <> smr gs)
+          (map (cut <> smr) (cons (navigate gs) ops)))
    h k))
 
-;; navigate = carve . descend . ascend, sealed by the lift.
-(define (navigate guides)
-  (unless (= (vector-length guides) 2)
-    (error 'navigate "cursor needs exactly 2 guides (start end); got ~a" (vector-length guides)))
-  (zipper-lift (carve guides) (descend guides) (ascend guides)))
+;; guide: the navigation accessor, three faces dispatched by type.
+;;   (guide z)       read the installed pair
+;;   ((guide gs) z)  install a 2-vector      }  both write faces
+;;   ((guide f) z)   install (f current)     }  navigate
+;; The faces are disjoint at this level (zipper | procedure | 2-vector); modify =
+;; install what f makes of the read.  Composed accessors reach the zipper only
+;; through the write faces, so a composite write navigates exactly once, at the
+;; outermost face.
+(define guide
+  (letrec ([install (curry (lambda (gs z)
+                             (match-define (zipper h k smr _) z)
+                             ((zipper-lift) (zipper h k smr gs))))]
+           [modify  (curry (lambda (f z) ((install (f (zipper-guides z))) z)))])
+    (match-lambda
+      [(? zipper? z)         (zipper-guides z)]
+      [(? procedure? f)      (modify f)]
+      [(and gs (vector _ _)) (install gs)])))
 
-;; editing verbs: configured, then lifted -- ((replace content) z) -> z, so they chain by
-;; composition.  insert is replace, named for a gap (an empty focus); delete is the empty
-;; replace.  WHERE a gap sits (its gravity) was fixed by the guide at navigate time.
-(define (replace content) (zipper-lift (replace* content)))
-(define insert            replace)
-(define delete            (replace ""))
-(define to-root           (zipper-lift to-root*))
+;; focus: the editing accessor, guide's twin.
+;;   (focus z)       read the focus rope
+;;   ((focus c) z)   swap in content c (string | rope)   }  both write faces
+;;   ((focus f) z)   swap in (f current)                 }  navigate
+;; delete = ((focus "") z); insert = a swap at a gap.  set = the lift composed
+;; with the op that swaps the head's rope (make-rope coerces; anchors and stack
+;; pass through untouched, so the edit is safe until navigation lands it).
+(define focus
+  (letrec ([read   (lambda (z) (head-rope (zipper-head z)))]
+           [set    (compose zipper-lift
+                            (curry (lambda (c smr h k)
+                                     (match-let ([(head b _ a) h])
+                                       (values (head b ((make-rope smr) c) a) k)))))]
+           [modify (curry (lambda (f z) ((set (f (read z))) z)))])
+    (match-lambda
+      [(? zipper? z)    (read z)]
+      [(? procedure? f) (modify f)]
+      [c                (set c)])))
 
-;; peek: the cursor's view -- the bracketing summaries and the focused rope.
-(define (peek z)
-  (match-let ([(zipper (head b m a) _ _) z])
-    (values b m a)))
+;; to-root: fold every crumb back into the head -- the focus becomes the whole
+;; document.  Deliberately OUTSIDE the lift: homing must not navigate back down;
+;; the guides survive for the next install.
+(define (to-root z)
+  (match-define (zipper h k smr gs) z)
+  (zipper (foldl (lambda (crumb h) (crumb h)) h k) '() smr gs))
+
+;; on-edges: the cursor's two edges as cuts, spread over f and g, combined by c
+;; (the spread-combine shape).  Each edge of the focus is a cut on the document;
+;; the focus folds onto the side the edge doesn't face, with the zipper's own smr:
+;;   ((on-edges c f g) z) = (c (f b (smr m a)) (g (smr b m) a))
+;;                              '- left edge -'  '- right edge -'
+(define ((on-edges c f g) z)
+  (match-define (zipper (head b m a) _ smr _) z)
+  (c (f b (smr m a)) (g (smr b m) a)))
+
+;; ---------- printing ----------
+;; The zipper prints as its document with the cursor marked inline:
+;;   gap -> before‸after        seg -> before⟦focus⟧after
+;; The pieces are read by RE-CUTTING: `multisect` with the installed guides over
+;; the root document.  This LEANS ON THE GUIDE--FOCUS ALIGNMENT: every write
+;; re-navigates, so the cursor stands exactly where its guides point and the
+;; re-cut reproduces the focus.  True by the invariant, but an extra load on it
+;; -- a guide-free reconstruction (off the crumbs) was sketched and not taken
+;; for now.  No guides installed -> the bare document.
+(define (zipper-show z port)
+  (define gs   (guide z))
+  (define smr  (zipper-smr z))
+  (define root (focus (to-root z)))
+  (if gs
+      (let-values ([(b m a) ((multisect gs) root)])
+        (if (equal? m (empty smr))
+            (fprintf port "~a‸~a" b a)
+            (fprintf port "~a⟦~a⟧~a" b m a)))
+      (display root port)))
 
 ;; ============================================================================
 (module+ test
@@ -156,30 +213,59 @@
   (define ((at n) L R) (cond [(< L n) 1] [(> L n) -1] [else 0]))
   (define (gap n)   (vector (at n) (at n)))
   (define (seg i j) (vector (at i) (at j)))
-  (define (focus z) (let-values ([(b m a) (peek z)]) m))
   (define (gap? z)  (equal? (focus z) ((make-rope cc))))
   (define (doc z)   (~a (focus (to-root z))))
-  (define rope ((make-rope cc #:chunk-size 2) "hello world"))
+  (define delete (focus ""))
+  (define rope ((make-rope cc) "hello world"))
   (define z0 (start cc rope))
 
-  ;; gap: empty focus, insert lands at the offset
-  (let ([z ((navigate (gap 5)) z0)])
+  ;; the lens, read face: installing is remembered; a fresh zipper has no guides
+  (check-false (guide z0))
+  (let ([g5 (gap 5)])
+    (check-eq? (guide ((guide g5) z0)) g5))
+
+  ;; gap: installing navigates to an empty focus; a swap at a gap = insert
+  (let ([z ((guide (gap 5)) z0)])
     (check-true  (gap? z))
     (check-equal? (~a (focus z)) "")
-    (check-equal? (doc ((insert "XYZ") z)) "helloXYZ world"))
+    (check-equal? (doc ((focus "XYZ") z)) "helloXYZ world"))
 
-  ;; seg: the slice is the focus; replace / delete rebuild the whole document
-  (let ([z ((navigate (seg 0 5)) z0)])
+  ;; seg: the slice is the focus; a write navigates to where the guide points
+  ;; on the NEW text (char guides re-resolve by offset, hence "HI wo")
+  (let ([z ((guide (seg 0 5)) z0)])
     (check-false (gap? z))
     (check-equal? (~a (focus z)) "hello")
-    (check-equal? (doc ((replace "HI") z)) "HI world")
+    (let ([z* ((focus "HI") z)])
+      (check-equal? (~a (focus z*)) "HI wo")
+      (check-equal? (doc z*) "HI world"))
     (check-equal? (doc (delete z)) " world"))
 
-  ;; a seg in the middle; wrapping is replace around the peeked focus
-  (let ([z ((navigate (seg 6 11)) z0)])
-    (check-equal? (~a (focus z)) "world")
-    (check-equal? (doc ((replace ((make-rope cc) "[" (focus z) "]")) z)) "hello [world]"))
+  ;; the lens, modify face: f sees the old pair -- change one edge, keep the other
+  (let* ([z  ((guide (seg 0 5)) z0)]
+         [z* ((guide (lambda (gs) (vector (vector-ref gs 0) (at 11)))) z)])
+    (check-equal? (~a (focus z*)) "hello world"))
 
-  ;; verbs compose: one navigate-edit-home pipeline
-  (check-equal? (~a (focus ((compose to-root (replace "HI") (navigate (seg 0 5))) z0)))
-                "HI world"))
+  ;; a seg in the middle; wrapping is focus's modify face around the current focus
+  (let ([z ((guide (seg 6 11)) z0)])
+    (check-equal? (~a (focus z)) "world")
+    (check-equal? (doc ((focus (lambda (m) ((make-rope cc) "[" m "]"))) z)) "hello [world]"))
+
+  ;; writes compose: one navigate-edit-home pipeline
+  (check-equal? (~a (focus ((compose to-root (focus "HI") (guide (seg 0 5))) z0)))
+                "HI world")
+
+  ;; --- on-edges: each edge cut through its own function, results combined ---
+  (let ([z ((guide (seg 6 11)) z0)])                          ; focus "world"
+    (check-equal? ((on-edges list list list) z) '((6 5) (11 0)))   ; b | m+a . b+m | a
+    (check-equal? ((on-edges + - -) z) (+ (- 6 5) (- 11 0))))      ; spread-combine shape
+  (let ([z ((guide (gap 5)) z0)])                             ; a gap: both edges agree
+    (check-equal? ((on-edges list list list) z) '((5 6) (5 6))))
+
+  ;; --- printing: a zipper displays as its marked document ---
+  (check-equal? (~a ((guide (gap 5)) z0)) "hello‸ world")     ; gap = caret
+  (check-equal? (~a ((guide (seg 0 5)) z0)) "⟦hello⟧ world")  ; seg = bracketed focus
+  (check-equal? (~a z0) "hello world")                        ; no guides -> bare document
+  (check-equal? (~a ((focus "HI") ((guide (seg 0 5)) z0)))    ; navigated cursor shows
+                "⟦HI wo⟧rld")
+  (let ([z ((guide (gap 6)) (start cc ((make-rope cc) "ab\ncd\nef")))])
+    (check-equal? (~a z) "ab\ncd\n‸ef")))                     ; marks sit at the cut, multi-line

@@ -1,173 +1,196 @@
 #lang racket
 
-;; Sexp summary: the opens/closes frontier algebra, as an `smr` for the current
-;; rope-core (`make-summary`). Ported from deprecated-2/summary-algebras.rkt with one
-;; agreed change: `opens` is stored INNERMOST-FIRST (not reversed), so it matches
-;; `closes` (already innermost-first) and both read off the head:
+;; Sexp summary: the opens/closes frontier algebra as a SIGNED struct, for the current
+;; rope-core (`make-summary`).  Two storage decisions distinguish it from the 7-list
+;; version it replaces (deprecated-5 era):
 ;;
-;;   (car opens)  of the before-summary = k_left  (children left of the cursor's frame)
-;;   (car closes) of the after-summary  = k_right (children right of the cursor's frame)
+;; SIGNED STACKS.  `opens` entries are +(k+1), `closes` entries are -(k+1), so a value
+;; reads (frontier ... (negatives) forms (positives) ...) and the slot indexes read
+;; DIRECTLY off the stack heads: front = (car opens) of the before summary, back =
+;; (car closes) of the after summary.  Neither stack ever holds 0 (zero stays the
+;; frame's own boundary).  This reverses 2026-06-07/1 Part D's counts-only storage:
+;; the offset IS storable once both stacks carry it symmetrically and the combine
+;; compensates -- the associativity battery below is the proof.
 ;;
-;; A summary value is either #f (the empty/identity, = (sexp-leaf "")) or a 7-list:
+;; COMPLETION COUNTING.  A frame counts on the enclosing level at its ")" (the pop
+;; bumps what it exposes), not at its "(".  Atoms still count at their first char.
+;; So an open frame's interior leads with the same value as the frame's own start
+;; slot -- a prefix extension of it -- instead of colliding with the NEXT sibling's
+;; start, and spine comparison is naively lexicographic (see sexp-edit.rkt).  The
+;; old at-"(" bump was inherited from the original fold, never a reasoned choice.
+;; Mirrored on the right: a dangling ")" seeds the level above with the frame it
+;; closed (forms := 1), so `closes` entries count frames whose close is ahead.
+;; Every completion is counted exactly once, by whichever side saw the ")":
+;; a leaf pop bumps; the merge's cancellation does NOT (the right chunk counted it).
 ;;
-;;   (starts-atom? starts-form? closes forms opens ends-atom? ends-form?)
-;;
-;;   closes : dangling closes -- ")"s with no matching "(" in this chunk. Each entry =
-;;            the form-count that preceded it at that level. INNERMOST-FIRST.
+;;   closes : dangling ")"s, innermost-first; entry = -(k+1), k = forms preceding it
+;;            at its level (atoms by start, frames by close).
 ;;   forms  : complete forms at the current (innermost-open, or top) level.
-;;   opens  : the open frontier -- one entry per still-open "(", each = the forms
-;;            nested in it so far. INNERMOST-FIRST (car = deepest).
-;;
-;; `closes` faces left (it cancels opens from before), `opens` faces right (they are
-;; cancelled by closes after). The monoid `sexp+` combines two chunks by matching the
-;; left's `opens` against the right's `closes` at the seam.
+;;   opens  : open "("s, innermost-first; entry = +(k+1), k = children so far.
 
-(require "rope-core.rkt")          ; make-summary make-rope
+(require racket/match
+         "rope-core.rkt")          ; make-summary make-rope
 
-(provide sexp                      ; the smr  -- (sexp str), ((make-rope sexp) ...)
+(provide sexp-smr                  ; the smr  -- (sexp-smr str), ((make-rope sexp-smr) ...)
          sexp-leaf sexp+           ; the algebra (leaf measure, combine)
-         sexp-opens sexp-closes sexp-forms)   ; accessors over a summary value
+         (struct-out frontier)     ; the summary value
+         ;; #f-safe readers (#f is the empty/identity summary)
+         sexp-opens sexp-closes sexp-forms
+         sexp-starts-atom? sexp-starts-form? sexp-ends-atom? sexp-ends-form?)
+
+;; ---------- the summary value ----------
+;; #f stays the empty/identity (= (sexp-smr "")).
+(struct frontier
+  (starts-atom?     ; first char continues/starts an atom
+   starts-form?     ; first char starts a form (atom char or "(")
+   closes           ; dangling ")"s, innermost-first; entries -(k+1)
+   forms            ; complete forms at the current level (a plain count)
+   opens            ; open "("s, innermost-first; entries +(k+1)
+   ends-atom?       ; last char is mid/end of an atom
+   ends-form?)      ; last char ends a form (atom char or ")")
+  #:transparent)
 
 ;; ---------- char classes ----------
 (define (sexp-atom? c)
   (not (or (char-whitespace? c) (char=? c #\() (char=? c #\)))))
 (define (sexp-form-start? c) (or (sexp-atom? c) (char=? c #\()))
-(define (sexp-form-end?   c) (or (sexp-atom? c) (char=? c #\))))
 
-;; a new form at the current level: top-level bumps `forms`, else the innermost
-;; open's count (the car, since opens is innermost-first).
+;; a new ATOM at the current level counts at its first char: top-level bumps `forms`,
+;; else the innermost open's entry (the offset rides along: +(k+1)+1 = +((k+1)+1)).
 (define (bump-sexp forms opens)
   (if (null? opens)
       (values (add1 forms) opens)
       (values forms (cons (add1 (car opens)) (cdr opens)))))
 
 ;; ---------- leaf measure ----------
-;; #f for the empty string (the identity); otherwise the 7-list. opens is kept
-;; innermost-first (NOT reversed); closes is reversed to innermost-first.
+;; signed sites: "(" pushes 1 (the open frame is +(0+1));  a dangling ")" emits
+;; -(forms+1).  counting sites: "(" does NOT bump the enclosing level; ")" does --
+;; a real pop bumps what it exposes, a dangling close seeds the level above with
+;; the frame it just closed (forms := 1).
 (define (sexp-leaf s)
   (and (positive? (string-length s))
        (let-values
            ([(sa? sf? closes forms opens in-atom? za? zf?)
              (for/fold ([sa? (sexp-atom? (string-ref s 0))]
                         [sf? (sexp-form-start? (string-ref s 0))]
-                        [closes '()]
-                        [forms 0]
-                        [opens '()]
-                        [in-atom? #f]
-                        [za? #f]
-                        [zf? #f])
+                        [closes '()] [forms 0] [opens '()]
+                        [in-atom? #f] [za? #f] [zf? #f])
                        ([c (in-string s)])
                (cond
                  [(sexp-atom? c)
                   (if in-atom?
                       (values sa? sf? closes forms opens #t #t #t)   ; same atom continues
                       (let-values ([(forms opens) (bump-sexp forms opens)])
-                        (values sa? sf? closes forms opens #t #t #t)))]  ; new atom = new form
+                        (values sa? sf? closes forms opens #t #t #t)))]
                  [(char=? c #\()
-                  (let-values ([(forms opens)
-                                (if (null? opens) (values forms opens) (bump-sexp forms opens))])
-                    (values sa? sf? closes forms (cons 0 opens) #f #f #f))]   ; push a new open
+                  (values sa? sf? closes forms (cons 1 opens) #f #f #f)]
                  [(char=? c #\))
                   (if (null? opens)
-                      (values sa? sf? (cons forms closes) 0 opens #f #f #t)   ; dangling close
-                      (let ([opens (cdr opens)])                              ; pop one open
-                        (values sa? sf? closes
-                                (if (null? opens) (add1 forms) forms)
-                                opens #f #f #t)))]
-                 [else
-                  (values sa? sf? closes forms opens #f #f #f)]))])           ; whitespace
-         (list sa? sf? (reverse closes) forms opens za? zf?))))
+                      (values sa? sf? (cons (- (add1 forms)) closes) 1 opens #f #f #t)
+                      (let ([opens (cdr opens)])
+                        (if (null? opens)
+                            (values sa? sf? closes (add1 forms) opens #f #f #t)
+                            (values sa? sf? closes forms
+                                    (cons (add1 (car opens)) (cdr opens)) #f #f #t))))]
+                 [else (values sa? sf? closes forms opens #f #f #f)]))])
+         (frontier sa? sf? (reverse closes) forms opens za? zf?))))
 
 ;; ---------- combine ----------
 ;; If the left ends mid-atom and the right starts mid-atom, the right's leading atom
-;; is a continuation, not a new form: drop it from the right's first form-count.
-(define (drop-start-sexp-atom x)
-  (match-define (list sa? sf? closes forms opens za? zf?) x)
-  (if (pair? closes)
-      (list sa? sf? (cons (sub1 (car closes)) (cdr closes)) forms opens za? zf?)
-      (list sa? sf? closes (sub1 forms) opens za? zf?)))
+;; is a continuation, not a new form: undo its count.  On -(k+1) the decrement is an
+;; add1 -- -(k+1)+1 = -((k-1)+1).
+(define (drop-start-atom y)
+  (match y
+    [(frontier _ _ (cons c rest) _ _ _ _)
+     (struct-copy frontier y [closes (cons (add1 c) rest)])]
+    [_ (struct-copy frontier y [forms (sub1 (frontier-forms y))])]))
 
-;; add n forms to the innermost open (the car, since opens is innermost-first).
-(define (add-inner-sexp opens n)
-  (cons (+ (car opens) n) (cdr opens)))
+;; add n forms to the innermost open; the offset rides along.
+(define (add-inner-sexp opens n) (cons (+ (car opens) n) (cdr opens)))
 
-;; reconcile the left's (forms, opens innermost-first) against the right's
-;; (closes innermost-first, forms, opens). opens/closes/stack all innermost-first,
-;; so the matching walks both from the head -- no reversing.
+;; reconcile the left's (forms, opens) against the right's (closes, forms, opens);
+;; all stacks innermost-first, so the matching walks both from the head.
 (define (merge-sexp-frontier forms opens closes right-forms right-opens)
-  (let loop ([forms forms]
-             [stack opens]          ; innermost-first
-             [closes closes]        ; innermost-first
-             [out '()])
+  (let loop ([forms forms] [stack opens] [closes closes] [out '()])
     (match closes
       ['()
        (if (null? stack)
            ;; right cancelled every left open: combined = right's frontier
            (values (reverse out) (+ forms right-forms) right-opens)
-           ;; leftover left opens (outer frames). The right's content (its forms, plus
-           ;; 1 if it left anything open) became children of the innermost leftover
-           ;; frame; the right's opens nest inside as the new innermost.
-           (let* ([extra (+ right-forms (if (pair? right-opens) 1 0))]
-                  [stack (if (zero? extra) stack (add-inner-sexp stack extra))])
+           ;; leftover left opens: the right's completed content becomes children of
+           ;; the innermost leftover frame (its own open frames count only on close)
+           (let ([stack (if (zero? right-forms) stack (add-inner-sexp stack right-forms))])
              (values (reverse out) forms (append right-opens stack))))]
-      [(cons close-count rest)
+      [(cons c rest)
        (if (pair? stack)
-           (let ([stack (cdr stack)])                                  ; close matches an open: pop
-             (loop (if (null? stack) (add1 forms) forms) stack rest out))
-           (loop 0 stack rest (cons (+ forms close-count) out)))])))   ; still dangling: emit
+           ;; close matches an open: pop, no bump -- the right chunk saw the ")" as
+           ;; dangling and already counted the completion (its forms := 1 seed)
+           (loop forms (cdr stack) rest out)
+           ;; still dangling: the left's forms precede it; on -(k+1) the addition is
+           ;; a subtraction -- -(k+1) - f = -((k+f)+1)
+           (loop 0 stack rest (cons (- c forms) out)))])))
 
 (define (sexp+ x y)
   (or (and x y
-           (match-let ([(list xa? xs? xc xf xo xz? xe?) x]
-                       [(list ya? ys? yc yf yo yz? ye?) y])
-             (define y* (if (and xz? ya?) (drop-start-sexp-atom y) y))
-             (match-define (list ya2? ys2? yc2 yf2 yo2 yz2? ye2?) y*)
-             (define-values (closes forms opens)
-               (merge-sexp-frontier xf xo yc2 yf2 yo2))
-             (list xa? xs? (append xc closes) forms opens yz2? ye2?)))
-      x
-      y))
+           (let ([y (if (and (frontier-ends-atom? x) (frontier-starts-atom? y))
+                        (drop-start-atom y)
+                        y)])
+             (match-let ([(frontier xa? xs? xc xf xo _ _) x]
+                         [(frontier _ _ yc yf yo yz? ye?) y])
+               (define-values (closes forms opens) (merge-sexp-frontier xf xo yc yf yo))
+               (frontier xa? xs? (append xc closes) forms opens yz? ye?))))
+      x y))
 
-;; ---------- the smr + accessors ----------
-(define sexp (make-summary sexp-leaf sexp+))
+;; ---------- the smr + #f-safe readers ----------
+(define sexp-smr (make-summary sexp-leaf sexp+))
 
-(define (sexp-opens  s) (if s (list-ref s 4) '()))
-(define (sexp-closes s) (if s (list-ref s 2) '()))
-(define (sexp-forms  s) (if s (list-ref s 3) 0))
+(define (sexp-opens  s) (if s (frontier-opens  s) '()))
+(define (sexp-closes s) (if s (frontier-closes s) '()))
+(define (sexp-forms  s) (if s (frontier-forms  s) 0))
+(define (sexp-starts-atom? s) (and s (frontier-starts-atom? s)))
+(define (sexp-starts-form? s) (and s (frontier-starts-form? s)))
+(define (sexp-ends-atom?   s) (and s (frontier-ends-atom?   s)))
+(define (sexp-ends-form?   s) (and s (frontier-ends-form?   s)))
 
 ;; ============================================================================
 (module+ test
   (require rackunit)
-  (define (opens  x) (sexp-opens  (sexp x)))
-  (define (closes x) (sexp-closes (sexp x)))
-  (define (forms  x) (sexp-forms  (sexp x)))
+  (define (opens  x) (sexp-opens  (sexp-smr x)))
+  (define (closes x) (sexp-closes (sexp-smr x)))
+  (define (forms  x) (sexp-forms  (sexp-smr x)))
 
-  ;; --- the touching parts of a cut  (_ _ ^)  ---
-  (check-equal? (opens  "(_ _ ") '(2))   ; k_left = 2 (two children to the left, frame open)
-  (check-equal? (forms  "(_ _ ") 0)
-  (check-equal? (closes "(_ _ ") '())
-  (check-equal? (closes ")")     '(0))   ; k_right = 0 (nothing right of the cursor before ")")
-  (check-equal? (opens  ")")     '())
-  (check-equal? (forms  ")")     0)
+  ;; --- signed, completion-counting worked values ---
+  (check-equal? (opens "(")          '(1))      ; the open frame itself is +(0+1)
+  (check-equal? (opens "(aa ")       '(2))
+  (check-equal? (opens "(aa (p ")    '(2 2))    ; enclosing NOT bumped at the "("...
+  (check-equal? (opens "(aa (p q)")  '(3))      ; ...bumped at the ")"
+  (check-equal? (opens "(aa bb cc")  '(4))
+  (check-equal? (closes ")")         '(-1))     ; "-1 = after last", directly in storage
+  (check-equal? (forms  ")")         1)         ; the closed frame seeds the level above
+  (check-equal? (closes "aa bb cc)") '(-4))
+  (check-equal? (closes "q) cc)")    '(-2 -3))  ; outer entry counts the closed frame
+  (check-equal? (forms  "()")        1)
+  (check-equal? (opens  "()")        '())
 
-  ;; head reads give the two counts directly
-  (check-equal? (car (opens  "(_ _ ")) 2)   ; k_left
-  (check-equal? (car (closes ")"))     0)    ; k_right
+  ;; --- the cut reads: front = (car opens) of before, back = (car closes) of after ---
+  (check-equal? (car (opens  "(aa "))   2)
+  (check-equal? (car (closes "bb cc)")) -3)
 
-  ;; --- a complete top-level form ---
-  (check-equal? (forms  "(_ _)") 1)
-  (check-equal? (opens  "(_ _)") '())
-  (check-equal? (closes "(_ _)") '())
+  ;; --- flags ---
+  (check-true  (sexp-ends-atom?   (sexp-smr "(aa bb cc")))
+  (check-true  (sexp-starts-form? (sexp-smr "(p q) cc)")))
+  (check-false (sexp-starts-form? (sexp-smr ") cc)")))
 
-  ;; --- multi-level opens, innermost-first ---
-  (check-equal? (opens "((a ")    '(1 1))  ; inner frame: 1 child (a); outer: 1 child (the list)
-  (check-equal? (opens "((a b) ") '(1))    ; inner closed -> outer has 1 child, inner's kids gone
-
-  ;; --- associativity: a chunked rope's summary == the single-leaf summary ---
-  ;; (this is the real test of the innermost-first merge adaptation)
-  (define (chunked str k) (sexp ((make-rope sexp #:chunk-size k) str)))
+  ;; --- associativity: k-char pieces combine to the whole-string summary ---
+  ;; (the real test of the signed completion-counting merge -- the variadic
+  ;; `sexp` folds `combine` over the measured pieces, vs one straight measure)
+  (define (chunked str k)
+    (apply sexp-smr (for/list ([i (in-range 0 (string-length str) k)])
+                  (substring str i (min (string-length str) (+ i k))))))
   (for* ([str (list "(_ _)" "((a b) c)" "(define (f x) (+ x 1))"
-                    "(_ _ " "((a " ")" "a b c" "(((x)))" ") foo (bar")]
+                    "(_ _ " "((a " ")" "a b c" "(((x)))" ") foo (bar"
+                    "()" "(())" "(aa (p q) cc)" "((a b) (c d))" "x (y) z"
+                    "q) cc)" "((a b) c")]
          [k (in-range 1 6)])
-    (check-equal? (chunked str k) (sexp str)
+    (check-equal? (chunked str k) (sexp-smr str)
                   (format "chunk size ~a of ~s" k str))))

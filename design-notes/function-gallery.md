@@ -1,6 +1,6 @@
 # Function Gallery
 
-Deprecated functions preserved for their aesthetic value.
+Deprecated functions preserved for their shape.
 
 ## `toward` — the gap-only descent step
 

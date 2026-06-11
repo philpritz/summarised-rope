@@ -34,7 +34,7 @@
 
 (provide
  make-summary  ; (make-summary string-summary combine) -> smr, the variadic summary fn
- make-rope     ; (make-rope smr [#:chunk-size n]) -> the rope builder (fuses, rebalances)
+ make-rope     ; (make-rope smr) -> the rope builder (fuses, rebalances)
  multisect     ; (multisect [guides]) -> splitter: t -> n+1 pieces as values; none -> balance halve
  frame)        ; ((frame smr b a) g) -> g with the outer context baked in
 ;; everything else is internal: leaf?/leaf-rope/branch-rope/empty-rope, concat-rope,
@@ -59,9 +59,12 @@
               (error 'branch "empty child -- branches hold two non-empty ropes"))
             (values summary algebra size height left right)))
 
-;; max-leaf: the target leaf size -- the fuse limit AND the default chunk, so
-;; chunking, splitting, and fusing all agree on how big a leaf wants to be.
-(define max-leaf 1024)
+;; max-leaf: the target leaf size -- the fuse limit AND the chunk, so chunking,
+;; splitting, and fusing all agree on how big a leaf wants to be. The one knob,
+;; deliberately not a parameter: a per-rope size would have to travel with the
+;; tree (concat recovers everything else from `tree-algebra`) and answer what
+;; happens at a seam between ropes that disagree.
+(define max-leaf 32)
 
 ;; ---------- summary ----------
 ;; (make-summary string-summary combine) -> smr, the variadic summary fn.
@@ -246,13 +249,13 @@
     (substring text start (min (string-length text) (+ start n)))))
 
 ;; ---------- rope (factory) ----------
-;; ((make-rope smr [#:chunk-size n]) . parts) assembles strings (chunked into leaves) and
+;; ((make-rope smr) . parts) assembles strings (chunked into max-leaf leaves) and
 ;; trees (passed through) by a dumb concat fold, then `rebalance`s the result if it
 ;; came out pathologically tall (a fresh load folds to a right-leaning spine).
-(define ((make-rope smr #:chunk-size [chunk max-leaf]) . parts)
+(define ((make-rope smr) . parts)
   (define (->rope x)
     (if (string? x)
-        (apply (concat-rope smr) (map (leaf-rope smr) (chunk-string x chunk)))
+        (apply (concat-rope smr) (map (leaf-rope smr) (chunk-string x max-leaf)))
         x))
   (define t (apply (concat-rope smr) (map ->rope parts)))
   (if (pathological? t) (rebalance t) t))
@@ -286,10 +289,11 @@
   (check-equal? (~a r) "abcdef")
   (check-equal? (sum r) 6)                          ; tree coerced -> cached summary
 
-  ;; chunked build still round-trips and summarises
-  (define r2 ((make-rope sum #:chunk-size 2) "hello world"))
-  (check-equal? (~a r2) "hello world")
-  (check-equal? (sum r2) 11)
+  ;; a build past max-leaf genuinely chunks, still round-trips and summarises
+  (define r2 ((make-rope sum) "the quick brown fox jumps over the lazy dog"))
+  (check-false  (leaf? r2))                         ; 43 chars > max-leaf -> a real branch
+  (check-equal? (~a r2) "the quick brown fox jumps over the lazy dog")
+  (check-equal? (sum r2) 43)
 
   ;; --- interleaving strings / trees / summaries ---
   (check-equal? (sum "ab" r "x") (+ 2 6 1))
@@ -330,8 +334,8 @@
                     (+ (* 3 (min (tree-size sl) (tree-size sr))) 1))))
 
   ;; --- rope rebalances a load that folds to a pathological spine ---
-  (define big ((make-rope sum) (make-string 65536 #\x)))   ; 64 max-leaf chunks -> a tall spine
-  (check-equal? (~a big) (make-string 65536 #\x))                  ; content intact
+  (define big ((make-rope sum) (make-string 2048 #\x)))   ; 64 max-leaf chunks -> a tall spine
+  (check-equal? (~a big) (make-string 2048 #\x))                   ; content intact
   (check-false (pathological? big))                               ; came out balanced, not a spine
 
   ;; --- rebalance turns a pathological spine into a non-pathological tree ---
@@ -356,12 +360,12 @@
     (check-equal? (~a whole) (string-append "abc" (make-string 3000 #\z) "d"))  ; content
     (check-equal? (leaf-text (leftmost whole)) "abc"))                          ; "ab"+"c" fused
 
-  ;; --- a chunk-1 build coalesces into max-leaf leaves, not a spine of singletons ---
-  (let ([t ((make-rope sum #:chunk-size 1) (make-string 3000 #\a))])
+  ;; --- a big build lands on max-leaf leaves: no oversized leaf, no scatter ---
+  (let ([t ((make-rope sum) (make-string 3000 #\a))])
     (define (leaf-count t) (if (leaf? t) 1 (+ (leaf-count (branch-left t)) (leaf-count (branch-right t)))))
     (check-equal? (~a t) (make-string 3000 #\a))
-    (check-true   (<= (leaf-count t) 8)))                            ; ~3 leaves, not 3000
+    (check-equal? (leaf-count t) (ceiling (/ 3000 max-leaf))))
 
   ;; --- size is tracked on every node, off the summary ---
   (check-equal? (tree-size r)  6)
-  (check-equal? (tree-size r2) 11))
+  (check-equal? (tree-size r2) 43))
