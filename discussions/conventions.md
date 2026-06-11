@@ -56,6 +56,12 @@ implement. The default is to explore it together and get a feel for it:
 
 A proposal is an invitation to think together, not a task to rush to done.
 
+What "let's have X" means in different contexts:
+- **Exploring:** wishful thinking, not an instruction — *suppose we had X* /
+  *suppose it were so*; conjure the design and talk about it.
+- **Mid-landing** (push mode, editing a file): it inherits the file
+  destination, per *Amendments inherit the last destination*.
+
 ## Questions are questions, not instructions
 
 When the user asks a question, answer the question. Do not infer a plan, a
@@ -106,6 +112,26 @@ So drafting is the collaborative mode; an explicit "add this" is not.
 Do not be eager to write discussion notes. Recording happens when the user
 decides to finish the session, not mid-thread. Keep designing until then;
 write the note only when the user calls the session done.
+
+## Two kinds of session
+
+Sessions fall into two categories; name the category in the note's opening line
+(existing notes already do: "An **implementation session**: …"). Their notes
+follow different guidelines:
+
+- **Implementation sessions** — the work lands in files: code, renames, surface
+  changes. The diff is the record, so the note is short: what landed, the test
+  state, and only the forks that were genuinely decided along the way (with
+  their losing options, per *Record the alternatives*). No narration of the
+  work itself.
+- **Design / exploration sessions** — the work is the thinking: options weighed,
+  shapes tried in chat, directions parked or rejected. Little or nothing lands,
+  so the note is the only artifact — give the ideas, the alternatives, and the
+  reasons full space, per *Record the alternatives* and *Space is proportional
+  to the fork*.
+
+A mixed session splits: its design arcs at design weight, its landings at
+implementation weight.
 
 ## Content style
 
