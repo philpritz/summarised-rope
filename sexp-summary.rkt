@@ -193,4 +193,83 @@
                     "q) cc)" "((a b) c")]
          [k (in-range 1 6)])
     (check-equal? (chunked str k) (sexp-smr str)
-                  (format "chunk size ~a of ~s" k str))))
+                  (format "chunk size ~a of ~s" k str)))
+
+  ;; --- the summary-law battery (summary-laws.rkt) on realistic generated sexps ---
+  (require "summary-laws.rkt" rackcheck)
+
+  ;; atoms: a lexicon of real words, synthesized lispy identifiers (hyphenated,
+  ;; ?/!/* suffixed -- multi-char, so mid-atom cuts have targets), and numbers.
+  (define gen:word    (gen:one-of '("define" "lambda" "let" "if" "cons" "x" "xs" "foo")))
+  (define gen:keyword (gen:one-of '("define" "lambda" "let" "if" "+" "list" "cond")))
+  (define gen:ident
+    (gen:let ([c    gen:char-letter]
+              [head (gen:string gen:char-letter #:max-length 3)]
+              [tail (gen:list (gen:let ([c2 gen:char-letter]
+                                        [s2 (gen:string gen:char-letter #:max-length 3)])
+                                (string-append (string c2) s2))
+                              #:max-length 2)]
+              [sfx  (gen:one-of '("" "" "?" "!" "*"))])
+      (string-append (string-join (cons (string-append (string c) head) tail) "-") sfx)))
+  (define gen:number (gen:map gen:natural number->string))
+  (define gen:atom   (gen:frequency `((4 . ,gen:word) (2 . ,gen:ident) (1 . ,gen:number))))
+
+  ;; whitespace between siblings, drawn per junction (so shrinking simplifies
+  ;; it): spaces, runs, newlines, and "" -- zero-width, legal where parens abut.
+  (define gen:ws (gen:one-of '(" " " " " " "  " "\n" "\n  " "")))
+
+  ;; trees: leaf = atom string; node = (list kids seps), keyword-headed forms
+  ;; with 0..3 further children, depth-bounded so termination is structural.
+  (define (gen:node max-kids d)
+    (gen:let ([kids (gen:frequency
+                     `((1 . ,(gen:const '()))
+                       (5 . ,(gen:let ([h gen:keyword]
+                                       [r (gen:list (if (zero? d)
+                                                        gen:atom
+                                                        (gen:tree max-kids d))
+                                                    #:max-length (sub1 max-kids))])
+                               (cons h r)))))]
+              [seps (apply gen:tuple (make-list (max 0 (sub1 (length kids))) gen:ws))])
+      (list kids seps)))
+  (define (gen:tree max-kids d)
+    (if (zero? d)
+        gen:atom
+        (gen:frequency `((2 . ,gen:atom) (2 . ,(gen:node max-kids (sub1 d)))))))
+
+  ;; deterministic render; a zero-width separator between two ATOMS would fuse
+  ;; them (changing the ground truth), so it falls back to a space there.
+  (define (render t)
+    (if (string? t)
+        t
+        (let loop ([ks (first t)] [seps (second t)] [acc ""])
+          (cond
+            [(null? ks)       (string-append "(" acc ")")]
+            [(null? (cdr ks)) (string-append "(" acc (render (car ks)) ")")]
+            [else
+             (define a    (car ks))
+             (define sep  (car seps))
+             (define sep* (if (and (string? a) (string? (cadr ks)) (equal? sep ""))
+                              " " sep))
+             (loop (cdr ks) (cdr seps) (string-append acc (render a) sep*))]))))
+
+  (define gen:sexp-doc (gen:map (gen:node 4 3) render))
+
+  ;; curated corpus: real code, the chunk-test strings above, edge cases. Swept
+  ;; deterministically (every entry, every single cut), then mixed into the
+  ;; random stream. Shrunk counterexamples from failed runs get appended here.
+  (define sexp-corpus
+    (list "(define (fact n) (if (zero? n) 1 (* n (fact (sub1 n)))))"
+          "(define (map f xs) (if (null? xs) '() (cons (f (car xs)) (map f (cdr xs)))))"
+          "(let loop ([i 0] [acc '()]) (if (= i 10) (reverse acc) (loop (add1 i) (cons i acc))))"
+          "(lambda (x . rest) (apply + x rest))"
+          "'(1 2 . 3)"
+          "(display \"hello world\")"
+          ";; a comment line\n(+ 1 2)"
+          "(define (f λ) (λ))"
+          "(_ _)" "((a b) c)" "(define (f x) (+ x 1))"
+          "(_ _ " "((a " ")" "a b c" "(((x)))" ") foo (bar"
+          "()" "(())" "(aa (p q) cc)" "((a b) (c d))" "x (y) z"
+          "q) cc)" "((a b) c"
+          "" " " "((((" "))))" "atom"))
+
+  (check-summary-laws sexp-smr gen:sexp-doc #:corpus sexp-corpus))

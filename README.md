@@ -9,6 +9,7 @@ rope-core.rkt     persistent summarised rope; the split primitive
 sexp-summary.rkt  the sexp summary algebra (signed frontier)
 zipper-core.rkt   the cursor machine; guide-agnostic
 sexp-edit.rkt     spine indexes, anchors, re-basing, re-anchoring
+summary-laws.rkt  optional law battery for summary writers (needs rackcheck)
 ```
 
 `design-notes/` and `discussions/` hold the rationale (dated, decision-level);
@@ -115,7 +116,8 @@ the operation is idempotent.
 ## Running tests
 
 ```powershell
-& "C:\Program Files\Racket\raco.exe" test .\rope-core.rkt .\sexp-summary.rkt .\zipper-core.rkt .\sexp-edit.rkt
+& "C:\Program Files\Racket\raco.exe" pkg install --batch --auto rackcheck   # once; the law tests need it
+& "C:\Program Files\Racket\raco.exe" test .\rope-core.rkt .\sexp-summary.rkt .\zipper-core.rkt .\sexp-edit.rkt .\summary-laws.rkt
 ```
 
-455 tests as of 2026-06-11.
+455 tests as of 2026-06-11, before the summary-law battery.
