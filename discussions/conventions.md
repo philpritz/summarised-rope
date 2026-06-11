@@ -164,6 +164,13 @@ status differs. A third, opposite disposition: **dropped** — a choice adopted
 then reversed, or whose premise later vanished. Unlike parked and rejected, it
 and its reasons need not be recorded.
 
+One exception: **purely intermediate representations are not alternatives.** A
+draft stage the winning design merely passed through within the session is
+scaffolding, not a fork — it was never weighed *against* the final shape, only
+refined *into* it, and it references nothing a reader can resolve. It stays out
+of the note; see *Record only the final shape* under *Write for a reader who
+wasn't there*.
+
 This is what lets a later session build on the work instead of re-deriving it:
 settled questions stay settled because the rationale is right there, and a wrong
 turn is cheap to undo — the runners-up and their reasons are already written, so
@@ -220,6 +227,14 @@ what survives, so nothing in it may depend on the transcript to be understood.
 - **Build on the repo, not the conversation.** Leaning on an earlier dated note or
   the code is fine — they're durable and a reader can follow the pointer. Leaning
   on what "we just said" is not.
+- **Record only the final shape.** Refinements over intermediate constructions
+  that were considered purely within the session should not appear in the note:
+  they reference nothing in the code — neither after the session nor before it —
+  and nothing in the previous notes, so a reader has no way to resolve them. This
+  bounds *Record the alternatives*: an alternative worth recording is a design
+  weighed **against the final shape**, described in place with the reason it lost.
+  The session's own draft stages of the winner are not alternatives — they are
+  scaffolding, and they drop out with the session.
 
 ## Refine a draft with agents
 
