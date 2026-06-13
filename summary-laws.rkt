@@ -19,7 +19,7 @@
 ;;
 ;; Laws compare values with equal?, so a summary's values must have a sensible
 ;; equal?. The kit depends only on the smr value itself (plus rackcheck and
-;; rackunit) -- never on rope-core. The rope-integration check (a built tree's
+;; rackunit) -- never on rope-core. The rope-integration check (a built rope's
 ;; cached summary = the flat measure) is deliberately NOT in this battery: given
 ;; these laws it is a theorem, so it can only fail when rope-core is at fault,
 ;; and this battery's verdicts are about the summary.

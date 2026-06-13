@@ -79,6 +79,9 @@ magnitude itself additive/storable, or direction grows past one bit (**parked**)
 - Safe because the monoid stores **counts** (additive); the polarity (`−(k+1)` view) lives
   in the **reader**, never in storage. The non-additivity objection dissolves under this
   split — the `+1` offset is precisely what breaks additivity, so it cannot be stored.
+  *[Reversed as of 2026-06-10: the offset IS storable once both stacks carry it
+  symmetrically and the combine compensates — see `2026-06-10/2` (signed storage), now
+  in `sexp-summary.rkt`.]*
 - Result: the summary is **symmetric around the seam** — `k_left = (car opens)` of
   `before`, `k_right = (car closes)` of `after`; `N` by zipping the two (lazy; usually
   only the innermost is needed).

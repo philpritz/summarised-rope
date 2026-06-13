@@ -13,7 +13,7 @@
 ;; point on the new state.  The machine ops:
 ;;
 ;;   ascend    rise (pop+apply crumbs) until the focus contains the whole segment
-;;   descend   strip whole subtrees (balance halve + guide reads) to the minimal node
+;;   descend   strip whole sub-ropes (balance halve + guide reads) to the minimal node
 ;;   carve     cut the focus EXACTLY at the boundaries (`multisect`), middle -> focus
 ;;   navigate  = carve . descend . ascend as ONE op -- the lift's permanent last op
 ;;

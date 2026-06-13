@@ -33,7 +33,8 @@ open, innermost-first — `closes` (`−(k+1)`), `forms` (completed forms), and 
 seam flags (`starts/ends-atom?`, `starts/ends-form?`). The combine is
 associative (battery-tested across chunkings), so summaries merge across any
 split. Counting is by completion: a frame counts on its enclosing level at its
-`)`, which makes spine comparison naively lexicographic.
+`)`, which makes spine comparison naively lexicographic. The summary fn is
+`sexp-smr`.
 
 ### zipper-core
 
@@ -46,41 +47,51 @@ end)`; a gap is `start = end` (empty focus), a seg is `start < end`.
 Surface — five names:
 
 - `start` — a zipper over a rope, no guides installed yet.
-- `guide` — the three-faced accessor on the installed pair: `(guide z)` reads;
-  `((guide gs) z)` installs a 2-vector; `((guide f) z)` installs `(f current)`.
-- `replace` — the one editing verb: swap the focus for new content. `delete` is
-  `(replace "")`; insert is replace at a gap.
+- `guide` — the three-faced navigation accessor on the installed pair: `(guide
+  z)` reads; `((guide gs) z)` installs a 2-vector; `((guide f) z)` installs
+  `(f current)`.
+- `focus` — the three-faced editing accessor on the content: `(focus z)` reads
+  the focus rope; `((focus c) z)` swaps in content (string or rope); `((focus
+  f) z)` swaps in `(f current)`. `delete` is `((focus "") z)`; insert is a swap
+  at a gap.
 - `to-root` — fold the crumbs back into the whole document.
-- `peek` — `(values before focus after)`.
+- `on-edges` — `((on-edges c f g) z)`: the cursor's two edge cuts — the focus
+  folded onto the side each edge doesn't face — spread over `f` and `g` and
+  combined by `c`. Generic over the zipper's own summary.
 
-The invariant: **every write re-navigates**. Installing guides moves the cursor
-to where they point; `replace` swaps the focus and then re-navigates with the
-installed guides on the new text. All writes funnel through one internal mover,
-so composed accessors built over `guide` inherit the invariant — one
-re-navigation per write, at the outermost face.
+The invariant: **every write navigates**. The lift composes `navigate` in as a
+permanent last op, so installing guides moves the cursor to where they point,
+and a `focus` swap re-navigates with the installed guides on the new text. Both
+accessors' write faces funnel through the one lift, so accessors composed over
+them inherit the invariant — one navigation per write, at the outermost face.
+`to-root` is deliberately outside the lift: homing must not navigate back down,
+and the guides survive it.
 
 ## Indexes, anchors, flipping
 
 An index is a **spine**: the per-level slot list, innermost-first, read straight
-off the frontier. The head's sign picks the **family**: a *front* index
-(non-negative) is derived only from the text to its left; a *back* index
-(components ≤ −1) only from the text to its right. Both name the same position
-on the present text; under edits each follows its own side. `fine@` reads both
-spines at a cut; `slot-guide` turns an index into a guide, sign-dispatched;
-`cursor` navigates a fresh zipper to one or two indexes.
+off the frontier. The head's sign picks the **family**: a *front* index (head
+≥ −½) is derived only from the text to its left; a *back* index (head ≤ −1) only
+from the text to its right. Both name the same position on the present text;
+under edits each follows its own side. `fine@` reads both spines at a cut;
+`slot-guide` turns an index into a guide, sign-dispatched; `cursor` navigates a
+fresh zipper to one or two indexes.
 
-At every cut and level `front − back = N+2`, so the per-level differences — the
-`moduli` — interconvert the families as arithmetic: `base-left`, `base-right`,
-`flip` (an involution). The moduli are exactly what one index alone cannot know;
-`edge-moduli` reads them at a cursor edge, where `anchors` reads both spines.
+At a cut the front and back heads differ by the **modulus** — the cut's frame's
+completed-form count plus one. That single number is the flip data one index
+alone cannot carry: re-basing is head-only (the path components are a left-based
+name shared by both anchorings), so `base-left` / `base-right` shift the head
+between families and `flip` (an involution) swaps it. `modulus` reads it from a
+pair of summaries; `edge-modulus` reads it at a cursor edge, where `anchors`
+reads both spines.
 
 **Re-anchoring** is the flip as a cursor operation: `(re-anchor z i side)`
-re-derives edge `i`'s guide from the chosen side's anchor and installs it
-through `guide`'s modify face. `(cover z)` flips the second guide onto its
-right anchor: the start then reads only the text before the seg, the end only
-the text after, so an edit between them touches neither — the cursor keeps
-covering whatever replaces the focus, across replace, delete, and insert, and
-the operation is idempotent.
+re-derives edge `i`'s guide from the chosen side's anchor (`'front` | `'back`)
+and installs it through `guide`'s modify face. `(cover z)` flips the second
+guide onto its right anchor: the start then reads only the text before the seg,
+the end only the text after, so an edit between them touches neither — the
+cursor keeps covering whatever replaces the focus, across swap, delete, and
+insert, and the operation is idempotent.
 
 ## Example
 
@@ -89,24 +100,25 @@ the operation is idempotent.
 
 (define text "(aa (p q) cc)")
 (define-values (^q _)                       ; front spine at the cut before q
-  (fine@ (sexp (substring text 0 7)) (sexp (substring text 7))))
+  (fine@ (sexp-smr (substring text 0 7)) (sexp-smr (substring text 7))))
 
-(define z  (cover (cursor ((make-rope sexp) text) ^q)))   ; covered gap at ^q
-(define z1 ((replace "x ") z))
-(~a (focus z1))             ; "x"  with its trailing space -- the cursor covers it
+(define z  (cover (cursor ((make-rope sexp-smr) text) ^q)))   ; covered gap at ^q
+(define z1 ((focus "x ") z))
+(~a (focus z1))             ; "x "  with its trailing space -- the cursor covers it
 (~a (focus (to-root z1)))   ; "(aa (p x q) cc)"
 
-(define z2 ((replace "x y ") z1))           ; verbs chain through the cursor
+(define z2 ((focus "x y ") z1))             ; edits chain through the cursor
 (~a (focus (to-root z2)))   ; "(aa (p x y q) cc)" -- q held its ground
 ```
 
 ## Domain and open edges
 
-- Targets land exactly on **form starts** — the only integer spine heads. The
-  end slot of a frame (the gap before a `)`) is not addressable: its fractional
-  read collides with the mid-atom read of the preceding atom (see
-  `discussions/2026-06-10`); end-based anchors are parked.
-- Segs are half-open `[start, start)` — the end index is the start of what
+- Targets land on **form starts** and on a frame's **end slot** — slot N of an
+  N-child frame, the gap before its `)`. Both read an integer spine head on each
+  side: the end region carries a raw back head of −1, unconfusable with a
+  mid-atom cut, whose straddled atom pushes the close entry to ≤ −2. A cursor in
+  a frame's trailing whitespace lands at the plateau's left edge.
+- Segs are half-open `[start, end)` — the end index is the start of what
   follows.
 - Spine address arithmetic (next/prev/parent as index operations) is
   undesigned.
@@ -120,4 +132,4 @@ the operation is idempotent.
 & "C:\Program Files\Racket\raco.exe" test .\rope-core.rkt .\sexp-summary.rkt .\zipper-core.rkt .\sexp-edit.rkt .\summary-laws.rkt
 ```
 
-455 tests as of 2026-06-11, before the summary-law battery.
+1195 tests as of 2026-06-13, the summary-law battery included.

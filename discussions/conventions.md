@@ -1,5 +1,18 @@
 # Discussion File Conventions
 
+## Session start
+
+**Project.** A persistent Racket rope that caches a user-defined summary at every node, with an s-expression zipper for structural navigation and editing.
+
+**To orient: read in order.**
+
+1. This file, in full.
+2. `design-notes/nomenclature.md` — the project's working vocabulary.
+3. The latest discussions.
+4. The source files.
+
+---
+
 This folder keeps compact notes from design sessions.
 
 ## Naming
