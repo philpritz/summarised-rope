@@ -1,5 +1,10 @@
 #lang racket
 
+;; Summaries: the general summary combinators plus the concrete summary algebras.
+;; The general piece is `bundle` (a product of summaries -- see below); the rest of
+;; the file is the sexp instance.  The summary *protocol* (make-summary and the
+;; gen:summary-part extension point) lives in rope-core; this file builds on it.
+;;
 ;; Sexp summary: the opens/closes frontier algebra as a SIGNED struct, for the current
 ;; rope-core (`make-summary`).  Two storage decisions distinguish it from the 7-list
 ;; version it replaces (deprecated-5 era):
@@ -29,71 +34,98 @@
 ;;   opens  : open "("s, innermost-first; entry = +(k+1), k = children so far.
 
 (require racket/match
-         "rope-core.rkt")          ; make-summary make-rope
+         "rope-core.rkt")          ; make-summary; gen:summary-part (for bundle-val)
 
-(provide sexp-smr                  ; the smr  -- (sexp-smr str), ((make-rope sexp-smr) ...)
+(provide bundle                    ; (bundle s1 s2 ...) -> the product smr
+         (struct-out bundle-val)   ; the product summary value
+         sexp-smr                  ; the smr  -- (sexp-smr str), ((make-rope sexp-smr) ...)
          sexp-leaf sexp+           ; the algebra (leaf measure, combine)
          (struct-out frontier)     ; the summary value
          ;; #f-safe readers (#f is the empty/identity summary)
          sexp-opens sexp-closes sexp-forms
+         sexp-head sexp-tail
          sexp-starts-atom? sexp-starts-form? sexp-ends-atom? sexp-ends-form?)
 
+;; ---------- bundle: a product of summaries ----------
+;; (bundle s1 s2 ...) -> the product smr; build & stamp ropes under it.  Its value
+;; is a `bundle-val` carrying every component, keyed by the component's own smr.
+;; Applying a component smr to a bundle-val selects that component (gen:summary-part);
+;; any other smr -- e.g. the product smr itself -- passes it through unchanged.  A
+;; guide/reader for component c reads through it with (on g c) (helper-algebras' `on`).
+(struct bundle-val (slots)              ; slots : #hasheq(component-smr -> value)
+  #:transparent
+  #:methods gen:summary-part
+  [(define (part->summary bv smr)
+     (if (hash-has-key? (bundle-val-slots bv) smr)
+         (hash-ref (bundle-val-slots bv) smr)
+         bv))])
+
+(define (bundle . components)
+  (make-summary
+   (lambda (str) (bundle-val (for/hasheq ([c (in-list components)]) (values c (c str)))))
+   (lambda (a b)  (bundle-val (for/hasheq ([c (in-list components)]) (values c (c a b)))))))
+
 ;; ---------- the summary value ----------
-;; #f stays the empty/identity (= (sexp-smr "")).
+;; #f stays the empty/identity (= (sexp-smr "")).  head/tail flank the three
+;; measure fields, so a value reads left-to-right like the fragment itself.
 (struct frontier
-  (starts-atom?     ; first char continues/starts an atom
-   starts-form?     ; first char starts a form (atom char or "(")
+  (head             ; class of the first char: 'open | 'close | 'ws | 'atom
    closes           ; dangling ")"s, innermost-first; entries -(k+1)
    forms            ; complete forms at the current level (a plain count)
    opens            ; open "("s, innermost-first; entries +(k+1)
-   ends-atom?       ; last char is mid/end of an atom
-   ends-form?)      ; last char ends a form (atom char or ")")
+   tail)            ; class of the last char:  'open | 'close | 'ws | 'atom
   #:transparent)
 
 ;; ---------- char classes ----------
-(define (sexp-atom? c)
-  (not (or (char-whitespace? c) (char=? c #\() (char=? c #\)))))
-(define (sexp-form-start? c) (or (sexp-atom? c) (char=? c #\()))
+;; every char falls in exactly one class; head/tail store the class of the
+;; first/last char, so a ")" edge is distinct from a whitespace edge (the four
+;; old booleans collapsed ")"/ws at a head and "("/ws at a tail).
+(define (char-class c)
+  (cond [(char=? c #\() 'open]
+        [(char=? c #\)) 'close]
+        [(char-whitespace? c) 'ws]
+        [else 'atom]))
 
-;; a new ATOM at the current level counts at its first char: top-level bumps `forms`,
-;; else the innermost open's entry (the offset rides along: +(k+1)+1 = +((k+1)+1)).
+;; a new form at the current level -- an atom at its first char, or a frame at
+;; its ")" -- counts the same way: top level bumps `forms`, else the innermost
+;; open's entry (the offset rides along: +(k+1)+1 = +((k+1)+1)).
 (define (bump-sexp forms opens)
   (if (null? opens)
       (values (add1 forms) opens)
       (values forms (cons (add1 (car opens)) (cdr opens)))))
 
 ;; ---------- leaf measure ----------
-;; signed sites: "(" pushes 1 (the open frame is +(0+1));  a dangling ")" emits
-;; -(forms+1).  counting sites: "(" does NOT bump the enclosing level; ")" does --
-;; a real pop bumps what it exposes, a dangling close seeds the level above with
-;; the frame it just closed (forms := 1).
+;; Tokenize the fragment into parens and maximal atom runs (whitespace falls
+;; away), then fold the signed completion-counting algebra over the tokens:
+;;   open   pushes a fresh frame, +(0+1);
+;;   atom   registers one form at the current level (bump-sexp);
+;;   close  pops its frame and registers it one level up (bump-sexp on the
+;;          popped stack) -- closing a frame and starting an atom are one act.
+;;          A DANGLING ")" instead seeds a fresh base level (forms := 1) and
+;;          emits -(forms+1), a frame whose close is still ahead.
+;; head/tail are just the first/last char's class -- off the ends, no scanning.
+;; #f stays the empty/identity (the positive? guard).
+(define (sexp-tokens s)                              ; parens and atom runs, in order
+  (map (lambda (t) (char-class (string-ref t 0)))
+       (regexp-match* #px"[()]|[^()\\s]+" s)))       ; -> list of 'open | 'close | 'atom
+
 (define (sexp-leaf s)
   (and (positive? (string-length s))
        (let-values
-           ([(sa? sf? closes forms opens in-atom? za? zf?)
-             (for/fold ([sa? (sexp-atom? (string-ref s 0))]
-                        [sf? (sexp-form-start? (string-ref s 0))]
-                        [closes '()] [forms 0] [opens '()]
-                        [in-atom? #f] [za? #f] [zf? #f])
-                       ([c (in-string s)])
-               (cond
-                 [(sexp-atom? c)
-                  (if in-atom?
-                      (values sa? sf? closes forms opens #t #t #t)   ; same atom continues
-                      (let-values ([(forms opens) (bump-sexp forms opens)])
-                        (values sa? sf? closes forms opens #t #t #t)))]
-                 [(char=? c #\()
-                  (values sa? sf? closes forms (cons 1 opens) #f #f #f)]
-                 [(char=? c #\))
-                  (if (null? opens)
-                      (values sa? sf? (cons (- (add1 forms)) closes) 1 opens #f #f #t)
-                      (let ([opens (cdr opens)])
-                        (if (null? opens)
-                            (values sa? sf? closes (add1 forms) opens #f #f #t)
-                            (values sa? sf? closes forms
-                                    (cons (add1 (car opens)) (cdr opens)) #f #f #t))))]
-                 [else (values sa? sf? closes forms opens #f #f #f)]))])
-         (frontier sa? sf? (reverse closes) forms opens za? zf?))))
+           ([(closes forms opens)
+             (for/fold ([closes '()] [forms 0] [opens '()])
+                       ([tok (in-list (sexp-tokens s))])
+               (case tok
+                 [(atom)  (let-values ([(f o) (bump-sexp forms opens)])
+                            (values closes f o))]
+                 [(open)  (values closes forms (cons 1 opens))]
+                 [(close) (if (null? opens)
+                              (values (cons (- (add1 forms)) closes) 1 opens)
+                              (let-values ([(f o) (bump-sexp forms (cdr opens))])
+                                (values closes f o)))]))])
+         (frontier (char-class (string-ref s 0))
+                   (reverse closes) forms opens
+                   (char-class (string-ref s (sub1 (string-length s))))))))
 
 ;; ---------- combine ----------
 ;; If the left ends mid-atom and the right starts mid-atom, the right's leading atom
@@ -101,7 +133,7 @@
 ;; add1 -- -(k+1)+1 = -((k-1)+1).
 (define (drop-start-atom y)
   (match y
-    [(frontier _ _ (cons c rest) _ _ _ _)
+    [(frontier _ (cons c rest) _ _ _)
      (struct-copy frontier y [closes (cons (add1 c) rest)])]
     [_ (struct-copy frontier y [forms (sub1 (frontier-forms y))])]))
 
@@ -132,13 +164,14 @@
 
 (define (sexp+ x y)
   (or (and x y
-           (let ([y (if (and (frontier-ends-atom? x) (frontier-starts-atom? y))
+           (let ([y (if (and (eq? (frontier-tail x) 'atom)
+                             (eq? (frontier-head y) 'atom))
                         (drop-start-atom y)
                         y)])
-             (match-let ([(frontier xa? xs? xc xf xo _ _) x]
-                         [(frontier _ _ yc yf yo yz? ye?) y])
+             (match-let ([(frontier xh xc xf xo _) x]
+                         [(frontier _  yc yf yo yt) y])
                (define-values (closes forms opens) (merge-sexp-frontier xf xo yc yf yo))
-               (frontier xa? xs? (append xc closes) forms opens yz? ye?))))
+               (frontier xh (append xc closes) forms opens yt))))
       x y))
 
 ;; ---------- the smr + #f-safe readers ----------
@@ -147,10 +180,14 @@
 (define (sexp-opens  s) (if s (frontier-opens  s) '()))
 (define (sexp-closes s) (if s (frontier-closes s) '()))
 (define (sexp-forms  s) (if s (frontier-forms  s) 0))
-(define (sexp-starts-atom? s) (and s (frontier-starts-atom? s)))
-(define (sexp-starts-form? s) (and s (frontier-starts-form? s)))
-(define (sexp-ends-atom?   s) (and s (frontier-ends-atom?   s)))
-(define (sexp-ends-form?   s) (and s (frontier-ends-form?   s)))
+(define (sexp-head s) (and s (frontier-head s)))   ; class of first char, #f if empty
+(define (sexp-tail s) (and s (frontier-tail s)))   ; class of last char,  #f if empty
+;; the edge predicates, rederived from the head/tail classes (#f-safe: an empty
+;; summary has #f head/tail, so every predicate is #f).
+(define (sexp-starts-atom? s) (eq? (sexp-head s) 'atom))
+(define (sexp-starts-form? s) (case (sexp-head s) [(atom open)  #t] [else #f]))
+(define (sexp-ends-atom?   s) (eq? (sexp-tail s) 'atom))
+(define (sexp-ends-form?   s) (case (sexp-tail s) [(atom close) #t] [else #f]))
 
 ;; ============================================================================
 (module+ test
@@ -158,6 +195,13 @@
   (define (opens  x) (sexp-opens  (sexp-smr x)))
   (define (closes x) (sexp-closes (sexp-smr x)))
   (define (forms  x) (sexp-forms  (sexp-smr x)))
+
+  ;; --- bundle: a product summary; each component smr selects its own part ---
+  (let* ([cc (make-summary string-length +)]      ; a second summary: char count
+         [b  (bundle sexp-smr cc)])
+    (check-equal? (sexp-smr (b "(aa bb")) (sexp-smr "(aa bb"))   ; sexp part selected
+    (check-equal? (cc (b "(aa bb")) 6)                            ; char part selected
+    (check-equal? (b "(aa" " bb") (b "(aa bb")))                  ; product folds associatively
 
   ;; --- signed, completion-counting worked values ---
   (check-equal? (opens "(")          '(1))      ; the open frame itself is +(0+1)

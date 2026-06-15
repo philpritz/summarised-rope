@@ -29,9 +29,11 @@ family by which of those it is.
   focus.
 - **frame** — bake outer context into a guide, so it judges as if it saw the whole
   document.
-- **sand** (**sand-spines**) — reduce a head to its maximal *contiguous* runs: stretches
-  where the spine doesn't change. Sands the *inner* spines away, leaving only the
-  segment edges. The pieces run with the grain; the boundaries are where it changes.
+- **sand** (**sand-spines**) — read both full spines at a cut: the all-left `front` and
+  all-right `back`, each innermost-first, with the ½ refinement sanded into the head (a
+  form start or the close-adjacent end slot reads integer; a mid-atom cut or whitespace
+  leans ½, whitespace binding to the previous form). Smooths the cut to its fine-grained
+  position: `(sand-spines L R) -> (values front back)`.
 
 **Indexes and spines**
 - **index** — a position in the document, named off the frontier summary.
@@ -45,14 +47,15 @@ family by which of those it is.
 - **head** — `before · focus · after`: the focus rope flanked by the summaries of
   everything outside it.
 - **gap** / **seg** — an empty focus (a single point) vs a non-empty one (an interval).
-- **seam** — the bisection midpoint between a branch's two children, where `descend`
-  reads the guide. (Also: an *atom-seam*, a boundary between tokens; and the summary's
-  *seam flags* — `starts/ends-atom?`/`form?` — which matter when combining at a junction.)
+- **seam** — the boundary between a branch's two children, where the left child's text
+  ends and the right's begins; `descend` reads the guide there, `concat` fuses there. A
+  position between pieces (like a `cut`), not the node that straddles it.
 
 **Summaries**
 - **summary** (**smr**) — the cached monoid value at every rope node.
-- **frontier** — the sexp summary value: signed `opens`/`closes` stacks, `forms`, and the
-  atom/form seam flags.
+- **frontier** — the sexp summary value, the struct `(frontier head closes forms opens
+  tail)`: signed `opens`/`closes` stacks, `forms`, and the `head`/`tail` char classes
+  (`'atom | 'open | 'close | 'ws`) of its first and last chars.
 - **battery** — the optional law suite (identity / associativity / homomorphism) offered
   to a summary's writer.
 

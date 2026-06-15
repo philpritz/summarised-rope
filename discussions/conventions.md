@@ -133,10 +133,10 @@ Sessions fall into two categories; name the category in the note's opening line
 follow different guidelines:
 
 - **Implementation sessions** — the work lands in files: code, renames, surface
-  changes. The diff is the record, so the note is short: what landed, the test
-  state, and only the forks that were genuinely decided along the way (with
-  their losing options, per *Record the alternatives*). No narration of the
-  work itself.
+  changes. The diff is the record, so the note is a short **bulleted list** (per
+  *Content style*): what landed, the test state, and only the forks that were
+  genuinely decided along the way (with their losing options, per *Record the
+  alternatives*). No narration of the work itself.
 - **Design / exploration sessions** — the work is the thinking: options weighed,
   shapes tried in chat, directions parked or rejected. Little or nothing lands,
   so the note is the only artifact — give the ideas, the alternatives, and the
@@ -151,6 +151,11 @@ implementation weight.
 Keep notes compact and durable:
 
 - Record decisions and open questions, not full transcripts.
+- **Notes are bulleted by default.** A note is a list — one bullet per decision,
+  fork, or open thread; a prose paragraph is the *exception*, used only for
+  genuinely connected narrative. Distinct decisions scan as a list, not as prose
+  that runs them together. This holds even when a short summary is asked for: a
+  short note is a *few bullets*, not a dense paragraph.
 - Mark parked ideas explicitly as parked.
 - Mark draft code clearly as draft code.
 - Include small code snippets only when they capture the shape of the design.
@@ -339,6 +344,15 @@ Don't open a second branch for a side change mid-session. If a change genuinely
 belongs on its own branch, the user will say so; the default is together.
 
 Pairs with *Amendments inherit the last destination*.
+
+## Where a new convention goes
+
+- **Prefer an existing section.** Slot a new convention into the section that
+  already covers its topic; add a new section only when none is appropriate.
+- **Keep it to a bullet.** A small amendment is a bullet, not a section --
+  reserve new sections for genuinely new, substantial topics. This keeps the
+  file's structure stable and its rules findable, rather than accreting thin
+  one-rule sections.
 
 ## When a convention is ambiguous
 

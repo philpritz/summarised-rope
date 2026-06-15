@@ -1,5 +1,7 @@
 #lang racket
 
+(require racket/generic)   ; define-generics -- the gen:summary-part extension point
+
 ;; Summarised rope: a persistent rope of text that caches a user-defined summary
 ;; at every node. Three factories make the whole surface:
 ;;
@@ -12,11 +14,12 @@
 ;;   summary -- the cached summary value (O(1) reads)
 ;;   algebra -- the summary fn it was built under, so `smr` can verify (by
 ;;              eq?) that a rope's cached value belongs to the summary folding it
-;;   size    -- char length, kept automatically for balancing. Unlike `summary`
-;;              it is fixed (= string-length), never user-supplied, so it is a
-;;              plain node field -- off the summary entirely.
-;;   height  -- node height (leaf 0, branch 1 + max child); like `size`, a plain
-;;              node field for balancing -- off the summary.
+;;   leaves  -- number of leaves, kept automatically for balancing. Structural,
+;;              like height: it counts NODES, not content. Char length is a content
+;;              measure (= string-length), so it is the summary's job, not a node
+;;              field -- read off a boundary leaf's own text when the seam needs it.
+;;   height  -- node height (leaf 0, branch 1 + max child); like `leaves`, a plain
+;;              structural node field for balancing -- off the summary.
 ;;
 ;; Nodes participate in Racket's display/write protocol (prop:custom-write on
 ;; `rope`, inherited), so (~a r), (display r), (with-output-to-string ...) all
@@ -32,32 +35,57 @@
 ;; Design notes: discussions/2026-05-29/2-claude.md (the variadic surface),
 ;; discussions/2026-06-01/1-claude.md (the cleanup this file is the rewrite of).
 
+;; ---------- contract vocabulary (private -- defined, not provided) ----------
+;; Shared across the contracts below; a `let` can't span contract-out clauses (and
+;; `provide` is no expression to wrap), so these live as module-level defines that
+;; simply stay off the provide list -- private to the module, unseen by importers.
+;;   smr/c   -- an smr is a bare closure, so `procedure?` is the most we can say.
+;;             Deliberately NOT (unconstrained-domain-> any/c): the range would be
+;;             any/c (summary values are user-defined, opaque), so the arrow checks
+;;             nothing the flat `procedure?` doesn't -- it only chaperones the smr,
+;;             which is then called on every measure. A flat check, no hot-path wrap.
+;;   guide/c -- a guide's codomain IS checkable, so this stays higher-order: a guide
+;;             that returns a bad value is caught at the split, not deep in binary
+;;             search. (It does follow the guide inward, re-checking on each call --
+;;             accepted: the split is where a malformed guide first bites.)
+(define smr/c   procedure?)
+(define guide/c (-> any/c any/c (or/c -1 0 1)))
+
 (provide
- make-summary  ; (make-summary string-summary combine) -> smr, the variadic summary fn
- make-rope     ; (make-rope smr) -> the rope builder (fuses, rebalances)
- multisect     ; (multisect [guides]) -> splitter: t -> n+1 pieces as values; none -> balance halve
- frame)        ; ((frame smr b a) g) -> g with the outer context baked in
+ rope?   ; the node predicate -- exposed for downstream contracts (zipper-core)
+ gen:summary-part part->summary summary-part?  ; the open extension point: a value that
+                ; selects/contributes itself to a summary under a given smr (e.g. a bundle value)
+ (contract-out
+  ;; (make-summary string-summary combine) -> smr, the variadic summary fn
+  [make-summary (-> (-> string? any/c) (-> any/c any/c any/c) smr/c)]
+  ;; (make-rope smr) -> the rope builder (fuses, rebalances); parts are strings | ropes
+  [make-rope    (-> smr/c (->* () #:rest (listof (or/c string? rope?)) rope?))]
+  ;; (multisect [guides]) -> splitter: t -> n+1 pieces as values; none -> balance halve.
+  ;; Result arity is (add1 (vector-length guides)) -- inexpressible, so the range is `any`.
+  [multisect    (->* () ((vectorof guide/c)) (-> rope? any))]
+  ;; ((frame smr b a) g) -> g with the outer context baked in
+  [frame        (-> smr/c any/c any/c (-> guide/c guide/c))]))
 ;; everything else is internal: leaf?/leaf-rope/branch-rope/empty-rope, concat-rope,
-;; bisect, bisect-guided, split-leaf, split-leaf-at, rope-size/rope-height, within-ratio,
+;; bisect, bisect-guided, split-leaf, split-leaf-at, rope-leaves/rope-height, within-ratio,
 ;; rebalance, pathological?, chunk-string, rope-write-text. Emptiness is
 ;; (equal? x ((make-rope smr))): the empty branch is unconstructable (branch guard), so
-;; the only size-0 rope is the canonical empty leaf.
+;; the only 0-leaf rope is the canonical empty leaf.
 
 ;; ---------- nodes ----------
 ;; A node is a leaf (its whole text) or a branch (two sub-ropes). The `rope`
-;; parent caches the summary value, the summary fn it was built under, char size,
-;; and height; the inherited accessors rope-summary / rope-algebra / rope-size /
+;; parent caches the summary value, the summary fn it was built under, leaf count,
+;; and height; the inherited accessors rope-summary / rope-algebra / rope-leaves /
 ;; rope-height read any node, and prop:custom-write is inherited too.
-(struct rope (summary algebra size height) #:transparent
+(struct rope (summary algebra leaves height) #:transparent
   #:property prop:custom-write (lambda (r port mode) (rope-write-text r port)))
-(struct leaf   rope (text)       #:transparent)   ; ctor: (leaf summary algebra size height text)
+(struct leaf   rope (text)       #:transparent)   ; ctor: (leaf summary algebra leaves height text)
 (struct branch rope (left right) #:transparent
   ;; the illegal state, made unconstructable: a branch holds two NON-empty ropes, so
-  ;; the only size-0 rope is ever the canonical empty leaf.
-  #:guard (lambda (summary algebra size height left right _name)
-            (when (or (zero? (rope-size left)) (zero? (rope-size right)))
+  ;; the only 0-leaf rope is ever the canonical empty leaf.
+  #:guard (lambda (summary algebra leaves height left right _name)
+            (when (or (zero? (rope-leaves left)) (zero? (rope-leaves right)))
               (error 'branch "empty child -- branches hold two non-empty ropes"))
-            (values summary algebra size height left right)))
+            (values summary algebra leaves height left right)))
 
 ;; max-leaf: the target leaf size -- the fuse limit AND the chunk, so chunking,
 ;; splitting, and fusing all agree on how big a leaf wants to be. The one knob,
@@ -75,6 +103,13 @@
 ;; Strings are measured, ropes contribute their cached summary (same-algebra
 ;; guarded), summary values pass through. Identity is (smr "") -- no separate
 ;; empty (string-summary is a monoid homomorphism). Knows nothing of `size`.
+
+;; the open extension point: a `summary-part` is a value that knows how to
+;; contribute itself to a summary under a given smr -- applying that smr selects
+;; its part (a bundle value extracts one component; see summaries.rkt's `bundle`).
+(define-generics summary-part
+  (part->summary summary-part smr))
+
 (define (make-summary string-summary combine)
   (define (smr . parts)
     (for/fold ([acc (string-summary "")])
@@ -88,18 +123,20 @@
               (rope-summary x)
               (error 'smr
                      "rope was summarised under a different summary; reconstruction unsupported"))]
+         [(summary-part? x) (part->summary x smr)]   ; a part selects itself under smr
          [else x]))))                           ; already a summary value
   smr)
 
 ;; ---------- construction ----------
-;; leaf-rope / branch-rope stamp the cached summary, size, and height. empty-rope
-;; is the canonical empty leaf -- the only representable empty, since concat drops
-;; empties before branching, so a branch is never empty.
+;; leaf-rope / branch-rope stamp the cached summary, leaf count, and height. A
+;; content leaf is 1 leaf; the empty leaf is 0, so (zero? rope-leaves) still uniquely
+;; marks the empty. empty-rope is the canonical empty leaf -- the only representable
+;; empty, since concat drops empties before branching, so a branch is never empty.
 (define ((leaf-rope smr) text)
-  (leaf (smr text) smr (string-length text) 0 text))
+  (leaf (smr text) smr (if (string=? text "") 0 1) 0 text))
 (define ((branch-rope smr) l r)
   (branch (smr l r) smr
-          (+ (rope-size l) (rope-size r))
+          (+ (rope-leaves l) (rope-leaves r))
           (add1 (max (rope-height l) (rope-height r)))
           l r))
 (define (empty-rope smr) (leaf (smr "") smr 0 0 ""))
@@ -115,38 +152,46 @@
   (values ((leaf-rope smr) (substring text 0 mid))
           ((leaf-rope smr) (substring text mid))))
 
-;; good-enough? makers for a split: the heavier side within a ratio of the lighter
-;; (plus 1 char of slack, to ignore sub-leaf granularity). The lazy heal uses a
-;; loose ratio; `rebalance` a tighter one.
-(define ((within-ratio a) l r)
-  (<= (max (rope-size l) (rope-size r))
-      (+ (* a (min (rope-size l) (rope-size r))) 1)))
-(define heal-ratio?    (within-ratio 3))   ; bisect's default -- the lazy heal
-(define rebuild-ratio? (within-ratio 2))   ; rebalance -- stricter, still not perfect
+;; A bisect weight guide reads the two boundary WEIGHTS (leaf counts) and returns a
+;; sign, like the navigation guides elsewhere: 0 = balanced enough (stop), +1 =
+;; right-heavy (borrow r->l), -1 = left-heavy (borrow l->r). `within-ratio` makes the
+;; guide that calls a split good enough when the heavier side is within a ratio of the
+;; lighter (plus 1 of slack, to ignore single-leaf granularity); the lazy heal uses a
+;; loose ratio, `rebalance` a tighter one. The sign IS the weight direction -- which is
+;; what bisect's overshoot guards rely on.
+(define ((within-ratio a) l r)             ; l, r are WEIGHTS (leaf counts)
+  (cond [(<= (max l r) (+ (* a (min l r)) 1)) 0]   ; good enough
+        [(> r l)  1]                               ; right-heavy
+        [else    -1]))                             ; left-heavy
+(define heal-guide    (within-ratio 3))   ; bisect's default -- the lazy heal
+(define rebuild-guide (within-ratio 2))   ; rebalance -- stricter, still not perfect
 
-;; Bisect a non-atomic node into two `good-enough?` halves. A leaf splits at its
-;; char midpoint; a branch rough-borrows across its boundary -- rotating the
-;; boundary child to the lighter side, [L [A B]] -> [[L A] B] (and the mirror) --
-;; until the sides pass `good-enough?` or a whole-sub-rope move would overshoot. The
+;; Bisect a non-atomic node into two halves the weight guide `g` calls balanced. A
+;; leaf splits at its char midpoint; a branch rough-borrows across its boundary --
+;; rotating the boundary child to the lighter side, [L [A B]] -> [[L A] B] (and the
+;; mirror) -- until `g` reads 0 or a whole-sub-rope move would overshoot. `g` reads
+;; the two leaf counts and returns a sign: 0 stop, +1 borrow r->l, -1 borrow l->r;
+;; the sign is the heavy side, so the overshoot guard (the chunk to move is smaller
+;; than the imbalance) keeps the borrow from flipping the rope further off-balance. The
 ;; concat invariant l ++ r = t holds throughout, so only the boundary branches are
 ;; rebuilt; every other sub-rope and every leaf is reused. All guided descent (in the
-;; zipper) builds on this, healing as it goes. Total: a leaf under size 2 splits into
+;; zipper) builds on this, healing as it goes. Total: a leaf under 2 chars splits into
 ;; an empty rope plus the rest, so the empty rope bisects to two empties.
-(define (bisect t [good-enough? heal-ratio?])
-  (if (leaf? t)
-      (split-leaf t)
-      (let ([smr (rope-algebra t)])
-        (define br (branch-rope smr))
-        (define (w x) (rope-size x))
-        (let loop ([l (branch-left t)] [r (branch-right t)])
-          (define gap (- (w r) (w l)))                          ; >0 right-heavy, <0 left-heavy
-          (cond
-            [(good-enough? l r) (values l r)]
-            [(and (positive? gap) (branch? r) (< (w (branch-left r))  gap))      ; borrow r->l
-             (loop (br l (branch-left r)) (branch-right r))]
-            [(and (negative? gap) (branch? l) (< (w (branch-right l)) (- gap)))  ; borrow l->r
-             (loop (branch-left l) (br (branch-right l) r))]
-            [else (values l r)])))))                            ; coarse boundary -- accept rough split
+(define (bisect t [g heal-guide])          ; g : weight weight -> {-1,0,1}
+  (match t
+    [(? leaf?) (split-leaf t)]
+    [(branch _ smr _ _ l0 r0)
+     (define br (branch-rope smr))
+     (define (w x) (rope-leaves x))
+     (let loop ([l l0] [r r0])
+       (match (g (w l) (w r))                                  ; the guide reads the imbalance
+         [0  (values l r)]                                     ; balanced enough -> done
+         [1  (if (and (branch? r) (< (w (branch-left r))  (- (w r) (w l))))   ; borrow r->l, no overshoot
+                 (loop (br l (branch-left r)) (branch-right r))
+                 (values l r))]                                ; coarse boundary -- accept
+         [-1 (if (and (branch? l) (< (w (branch-right l)) (- (w l) (w r))))   ; borrow l->r, no overshoot
+                 (loop (branch-left l) (br (branch-right l) r))
+                 (values l r))]))]))
 
 ;; A guide g : (L R) -> {-1,0,1} reads the FULL totals around a cut: +1 when the
 ;; boundary g names is RIGHT of the cut, -1 LEFT, 0 at it.  That stays true on a
@@ -202,44 +247,47 @@
             (values r (smr bAcc l) (cons l pieces)))))))
 
 ;; rebalance: rebuild t to a tighter balance by recursively bisecting with the
-;; stricter `rebuild-ratio?`. Leaves are reused (never bisected); only branches are
+;; stricter `rebuild-guide`. Leaves are reused (never bisected); only branches are
 ;; rebuilt -- O(leaves * log) -- so it resets accumulated shape debt. The pathology
 ;; tier: a fresh load or a node that drifted too tall is run through it once.
 (define (rebalance t)
   (if (leaf? t)
       t
-      (let-values ([(l r) (bisect t rebuild-ratio?)])
+      (let-values ([(l r) (bisect t rebuild-guide)])
         ((branch-rope (rope-algebra t)) (rebalance l) (rebalance r)))))
 
 ;; pathological?: height too tall for weight -- the scapegoat trigger. C=3 sits just
 ;; above the ~2.41 a ratio-3 rope guarantees (1/log2(4/3)), leaving the lazy heal
 ;; slack before a rebuild is forced; K=2 is constant slack for small ropes.
 (define (pathological? t)
-  (> (rope-height t) (+ (* 3 (log (add1 (rope-size t)) 2)) 2)))
+  (> (rope-height t) (+ (* 3 (log (add1 (rope-leaves t)) 2)) 2)))
 
 ;; ---------- join ----------
 ;; concat-rope: variadic join, folding the binary `join`. `join` drops empties,
 ;; fuses the seam when the two boundary leaves fit one leaf, else branches. It's the
 ;; inverse of bisect's split-leaf: descent splits a leaf, the rise's joins fuse it
-;; back. To reach the seam it descends a boundary edge only through SMALL children
-;; (< max-leaf) -- the bounded leaf tip that splitting leaves -- and stops at any real
-;; sub-rope, so it stays O(1)-ish, never O(depth). Balance-dumb: shape is bisect's job.
+;; back. To reach the seam it descends a boundary edge only through SMALL LEAF tips
+;; (< max-leaf chars -- the bounded fragment splitting leaves) and stops at any real
+;; sub-rope, so it stays O(1)-ish, never O(depth). Char count is read straight off
+;; those boundary leaves (string-length is O(1)) -- the only place it is needed, now
+;; that nodes cache leaf count, not char size. Balance-dumb: shape is bisect's job.
 (define ((concat-rope smr) . ropes)
   (letrec ([mt   (empty-rope smr)]
            [br   (branch-rope smr)]
            [fuse (lambda (l r) ((leaf-rope smr) (string-append (leaf-text l) (leaf-text r))))]
+           [chars (lambda (lf) (string-length (leaf-text lf)))]    ; O(1); only at the seam
            [join (match-lambda**
                   [((== mt) r) r]                                   ; empties drop
                   [(l (== mt)) l]
                   [((? leaf? l) (? leaf? r))                        ; two leaves at the seam:
-                   (if (<= (+ (rope-size l) (rope-size r)) max-leaf)
+                   (if (<= (+ (chars l) (chars r)) max-leaf)
                        (fuse l r)                                   ;   fuse if they fit,
                        (br l r))]                                   ;   else branch
-                  [((branch _ _ _ _ ll lr) r)                       ; small right tip of l
-                   #:when (< (rope-size lr) max-leaf)
+                  [((branch _ _ _ _ ll lr) r)                       ; small right LEAF tip of l
+                   #:when (and (leaf? lr) (< (chars lr) max-leaf))
                    (br ll (join lr r))]
-                  [(l (branch _ _ _ _ rl rr))                       ; small left tip of r
-                   #:when (< (rope-size rl) max-leaf)
+                  [(l (branch _ _ _ _ rl rr))                       ; small left LEAF tip of r
+                   #:when (and (leaf? rl) (< (chars rl) max-leaf))
                    (br (join l rl) rr)]
                   [(l r) (br l r)])])
     (foldr join mt ropes)))
@@ -330,8 +378,8 @@
   ;; --- bisect rough-borrows a spine toward weight-even (within ratio 3) halves ---
   (let-values ([(sl sr) (bisect (spine "abcdefgh"))])
     (check-equal? (string-append (~a sl) (~a sr)) "abcdefgh")          ; content preserved
-    (check-true (<= (max (rope-size sl) (rope-size sr))                ; within ratio
-                    (+ (* 3 (min (rope-size sl) (rope-size sr))) 1))))
+    (check-true (<= (max (rope-leaves sl) (rope-leaves sr))            ; within ratio (by leaves)
+                    (+ (* 3 (min (rope-leaves sl) (rope-leaves sr))) 1))))
 
   ;; --- rope rebalances a load that folds to a pathological spine ---
   (define big ((make-rope sum) (make-string 2048 #\x)))   ; 64 max-leaf chunks -> a tall spine
@@ -364,8 +412,9 @@
   (let ([t ((make-rope sum) (make-string 3000 #\a))])
     (define (leaf-count t) (if (leaf? t) 1 (+ (leaf-count (branch-left t)) (leaf-count (branch-right t)))))
     (check-equal? (~a t) (make-string 3000 #\a))
-    (check-equal? (leaf-count t) (ceiling (/ 3000 max-leaf))))
+    (check-equal? (leaf-count t) (ceiling (/ 3000 max-leaf)))
+    (check-equal? (rope-leaves t) (leaf-count t)))   ; the cached field matches the walk
 
-  ;; --- size is tracked on every node, off the summary ---
-  (check-equal? (rope-size r)  6)
-  (check-equal? (rope-size r2) 43))
+  ;; --- leaf count is tracked on every node, off the summary ---
+  (check-equal? (rope-leaves r)  1)            ; "abcdef": 6 chars, one leaf
+  (check-equal? (rope-leaves r2) 2))           ; 43 chars -> ceil(43/32) = 2 leaves

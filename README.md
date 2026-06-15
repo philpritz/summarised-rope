@@ -6,7 +6,7 @@ through a guide-driven zipper, with S-expressions as the worked structure.
 
 ```text
 rope-core.rkt     persistent summarised rope; the split primitive
-sexp-summary.rkt  the sexp summary algebra (signed frontier)
+summaries.rkt     bundle + the sexp summary algebra (signed frontier)
 zipper-core.rkt   the cursor machine; guide-agnostic
 sexp-edit.rkt     spine indexes, anchors, re-basing, re-anchoring
 summary-laws.rkt  optional law battery for summary writers (needs rackcheck)
@@ -26,7 +26,7 @@ guides)` is a splitter cutting the rope at each guide's boundary — n guides gi
 n+1 pieces as values; no guides is the balance halve. `frame` bakes outer
 context into a guide.
 
-### sexp-summary
+### summaries
 
 A string summarises to a signed frontier: `opens` — one `+(k+1)` per unclosed
 open, innermost-first — `closes` (`−(k+1)`), `forms` (completed forms), and the
@@ -129,7 +129,7 @@ insert, and the operation is idempotent.
 
 ```powershell
 & "C:\Program Files\Racket\raco.exe" pkg install --batch --auto rackcheck   # once; the law tests need it
-& "C:\Program Files\Racket\raco.exe" test .\rope-core.rkt .\sexp-summary.rkt .\zipper-core.rkt .\sexp-edit.rkt .\summary-laws.rkt
+& "C:\Program Files\Racket\raco.exe" test .\rope-core.rkt .\summaries.rkt .\zipper-core.rkt .\sexp-edit.rkt .\summary-laws.rkt .\helper-algebras.rkt
 ```
 
 1195 tests as of 2026-06-13, the summary-law battery included.

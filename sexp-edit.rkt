@@ -3,7 +3,7 @@
 ;; Sexp navigation + editing on the summarised rope, on SIGNED SPINE indexes.
 ;;
 ;; An index is a spine: the per-level position list, innermost-first, read straight
-;; off the signed frontier summary (sexp-summary.rkt).  Slots are 0-BASED at every
+;; off the signed frontier summary (summaries.rkt).  Slots are 0-BASED at every
 ;; level.  EACH COMPONENT picks the side it reads at its level: >= -1/2 against
 ;; the 0-based slot read (sub1'd opens ++ [forms]) of the before summary
 ;; (left-based, from the text to the left), <= -1 against (closes ++ [-(forms+1)])
@@ -14,50 +14,64 @@
 ;; pair, and re-deriving the other head at a cursor IS the anchor flip
 ;; (head-only, by one modulus).
 ;;
-;; `fine@` reads the all-left and all-right spines at a cut, with the ½ refinement
+;; `sand-spines` reads the all-left and all-right spines at a cut, with the ½ refinement
 ;; on the HEAD only: at a form start the head is the raw integer; mid-atom it is
 ;; pushed half-way into the atom (the one structurally invisible interior --
-;; frames' interiors are spine-visible as depth, atoms' are not); other cuts lean
-;; -½ before the next start.  Under completion counting an open frame's interior
+;; frames' interiors are spine-visible as depth, atoms' are not); whitespace binds
+;; to the previous form, leaning -½.  Under completion counting an open frame's interior
 ;; is a prefix extension of the frame's own start slot, so `spine-cmp` is NAIVELY
 ;; lexicographic: pad with -inf (a bare spine bottoms out before everything
 ;; deeper), read each level off the spine the index's component selects, and take
 ;; the first non-zero componentwise verdict.  Targets land on form starts AND on
-;; frames' END SLOTS -- slot N of an N-child frame: the end region (only
-;; whitespace between the cut and the close; raw back head -1, unconfusable with
-;; mid-atom, whose straddled atom pushes the close entry to <= -2) reads integer
-;; on both sides.  A guide is one comparison.
+;; frames' END SLOTS -- slot N of an N-child frame: the cut right before the close
+;; (head class `close`) reads integer on both sides.  `cut-kind` decides a cut from
+;; the two char-classes touching it (tail of L, head of R), so the end slot is the
+;; close-adjacent cut, not its leading whitespace.  A guide is one comparison.
 ;;
 ;; The layer is three reads and a comparison: everything else is zipper-core.
 
 (require racket/match
          srfi/41                ; variadic lazy streams: stream-map/constant/->list
          "rope-core.rkt"        ; make-rope multisect frame
-         "sexp-summary.rkt"     ; sexp-smr + the frontier readers
-         "zipper-core.rkt")     ; start guide focus to-root on-edges
+         "summaries.rkt"        ; sexp-smr + the frontier readers; bundle
+         "zipper-core.rkt"      ; start zipper-guide zipper-focus to-root on-edges
+         "helper-algebras.rkt") ; on -- projects a guide/reader onto a bundle component
 
-(provide fine@                  ; (fine@ L R) -> (values front-spine back-spine)
+(provide sand-spines            ; (sand-spines L R) -> (values front-spine back-spine)
          spine-cmp              ; (spine-cmp front back index) -> -1 | 0 | 1
          slot-guide             ; (slot-guide index) -> guide; components pick their side
          modulus base-left base-right flip  ; re-basing: head-only, by one modulus
          sexp-guides cursor     ; cursor conveniences over zipper-core
          edge-contexts anchors edge-modulus
          re-anchor cover        ; the anchor flip as a cursor operation
+         pure move spread       ; command vocabulary: lift, cursor verbs (chain re-exported from zipper-core)
          (all-from-out "rope-core.rkt")
-         (all-from-out "sexp-summary.rkt")
+         (all-from-out "summaries.rkt")
          (all-from-out "zipper-core.rkt"))
 
 ;; ---------- the cut reads ----------
+;; classify a cut by the two char-classes touching it: tail of L, head of R.
+;;   start  a form begins here (atom or "(")        -- flush, no lean
+;;   end    right before a ")" or the document end  -- flush, no lean
+;;   mid    straddling an atom                       -- front -½, back +½
+;;   lean   whitespace; binds to the previous form   -- front -½, back -½
+(define (cut-kind L R)
+  (case (sexp-head R)
+    [(atom)  (if (eq? (sexp-tail L) 'atom) 'mid 'start)]
+    [(open)  'start]
+    [(close) 'end]
+    [(ws)    'lean]
+    [else    'end]))                       ; R empty: the document end
+
 ;; both full spines at a cut, innermost-first, ½ baked into the heads; front
 ;; slots 0-based (the stored +1 drops at the read), back as stored.
-(define (fine@ L R)
-  (define mid?   (and (sexp-ends-atom? L) (sexp-starts-atom? R)))
-  (define start? (and (sexp-starts-form? R) (not mid?)))
+(define (sand-spines L R)
   (match-define (cons fh fr) (append (map sub1 (sexp-opens L)) (list (sexp-forms L))))
   (match-define (cons bh br) (append (sexp-closes R) (list (- (add1 (sexp-forms R))))))
-  (define end? (= bh -1))    ; nothing but whitespace before the close: the end slot
-  (values (cons (+ fh (cond [(or start? end?) 0] [else -1/2])) fr)
-          (cons (+ bh (cond [(or start? end?) 0] [mid? 1/2] [else -1/2])) br)))
+  (case (cut-kind L R)
+    [(start end) (values (cons fh fr)        (cons bh br))]
+    [(mid)       (values (cons (- fh 1/2) fr) (cons (+ bh 1/2) br))]
+    [(lean)      (values (cons (- fh 1/2) fr) (cons (- bh 1/2) br))]))
 
 ;; ---------- the comparison ----------
 ;; spine -> outermost-first component stream, -inf forever after (a bare spine --
@@ -65,7 +79,8 @@
 (define (spine->stream s)
   (stream-append (list->stream (reverse s)) (stream-constant -inf.0)))
 
-(define (component-cmp a b) (cond [(= a b) 0] [(< a b) 1] [else -1]))
+;; the ordinary 3-way order: -1 if a<b, +1 if a>b, 0 equal.
+(define (component-cmp a b) (cond [(< a b) -1] [(> a b) 1] [else 0]))
 
 ;; the family tag: back components sit at <= -1, front at >= -1/2 (the -1/2 is
 ;; a leaned head in a frame with no child counted yet -- whitespace right after
@@ -74,7 +89,8 @@
 
 ;; each component of the index picks the spine it reads against -- per-level
 ;; anchoring, so all-left, all-right, and mixed indexes resolve uniformly.
-(define (pick-cmp f b c) (component-cmp (if (back-component? c) b f) c))
+;; target vs cut (index component first), so +1 = target right of the cut.
+(define (pick-cmp f b c) (component-cmp c (if (back-component? c) b f)))
 
 ;; the verdict stream is read one past the longer spine: both sides are -inf
 ;; padding from there on, so an all-zero prefix means the cut IS the target.
@@ -92,12 +108,13 @@
 ;; `back-component?` at the half-step gap (front >= -1/2, back <= -1, leans
 ;; included).
 (define ((slot-guide ix) L R)
-  (define-values (front back) (fine@ L R))
+  (define-values (front back) ((on sand-spines sexp-smr) L R))
   (spine-cmp front back ix))
 
 ;; ---------- cursor conveniences ----------
 (define (sexp-guides s [e s]) (vector (slot-guide s) (slot-guide e)))
-(define (cursor rope s [e s]) ((guide (sexp-guides s e)) (start sexp-smr rope)))
+(define (cursor rope s [e s])                        ; place the cursor, then navigate to it
+  (let ([gs (sexp-guides s e)]) ((zipper-guide gs) (start sexp-smr rope gs))))
 
 ;; ---------- anchors ----------
 ;; each edge of the focus folds the focus to the other side; a gap (empty focus)
@@ -111,7 +128,7 @@
 ;; with the other one IS the flip.
 (define (anchors z i)
   (define-values (L R) (edge-contexts z i))
-  (define-values (f b) (fine@ L R))
+  (define-values (f b) ((on sand-spines sexp-smr) L R))
   (values f (cons (car b) (cdr f))))
 
 ;; ---------- re-basing ----------
@@ -121,7 +138,7 @@
 ;; anchorings -- so the flip data is one number, exactly what one index alone
 ;; cannot know.
 (define (modulus L R)
-  (define-values (f b) (fine@ L R))
+  (define-values (f b) ((on sand-spines sexp-smr) L R))
   (- (car f) (car b)))
 
 ;; re-base an index's head, given the modulus of its own cut; `back-component?`
@@ -139,13 +156,13 @@
 
 ;; ---------- re-anchoring ----------
 ;; install edge i's guide re-derived from the chosen side's anchor ('front |
-;; 'back), through the guide accessor's modify face: the anchor flip as a
+;; 'back), through the zipper-guide accessor's modify face: the anchor flip as a
 ;; cursor operation.  Same position now; the family decides how the edge
 ;; follows future edits.
 (define (re-anchor z i side)
   (define-values (front back) (anchors z i))
   (define g (slot-guide (if (eq? side 'front) front back)))
-  ((guide (lambda (gs)
+  ((zipper-guide (lambda (gs)
             (if (zero? i)
                 (vector g (vector-ref gs 1))
                 (vector (vector-ref gs 0) g))))
@@ -156,22 +173,62 @@
 ;; so the cursor keeps covering whatever replaces the focus.
 (define (cover z) (re-anchor z 1 'back))
 
+;; ---------- command vocabulary ----------
+;; A command is a zipper -> zipper (the cursor write faces already are).  `pure`
+;; lifts a value to a constant function (an absolute argument); `move`/`spread`
+;; are the cursor verbs.  (`chain`, the trace pipe, lives in zipper-core and is
+;; re-exported here.)
+(define ((pure x) _) x)
+
+;; move: reposition to a gap at (f current-index) -- whole-index, so f can change level.
+(define ((move f) z)
+  (let-values ([(ix _) (anchors z 0)])
+    ((zipper-guide (sexp-guides (f ix))) z)))
+
+;; spread: transform the two edges' innermost slots, each by a function on its number
+;; (the cdr -- the frame -- is untouched, so each edge stays in its own sexp).
+(define ((spread fl fr) z)
+  (let-values ([(s _s) (anchors z 0)] [(e _e) (anchors z 1)])
+    ((zipper-guide (sexp-guides (cons (fl (car s)) (cdr s))
+                                (cons (fr (car e)) (cdr e)))) z)))
+
+;; ============================================================================
+;; Tree generators -- in their own submodule, so they import without dragging in
+;; the test suite (a `module+ gen` is instantiated only when explicitly required).
+;; gen:shape draws bare nesting (bounded by max-kids/depth); gen:populate fills it
+;; with atoms; tree->text renders a populated tree to sexp source.
+(module+ gen
+  (require rackcheck)
+  (provide gen:shape gen:atom gen:populate tree->text)
+  (define (gen:shape max-kids depth)
+    (if (zero? depth) (gen:const '())
+        (gen:list (gen:shape max-kids (sub1 depth)) #:max-length max-kids)))
+  (define gen:atom
+    (gen:let ([c gen:char-letter] [cs (gen:string gen:char-letter #:max-length 3)])
+      (string-append (string c) cs)))
+  (define (gen:populate shape)
+    (if (null? shape) gen:atom (apply gen:tuple (map gen:populate shape))))
+  (define (tree->text t)
+    (if (string? t) t
+        (string-append "(" (string-join (map tree->text t) " ") ")"))))
+
 ;; ============================================================================
 (module+ test
-  (require rackunit)
+  (require rackunit rackcheck "helper-algebras.rkt"
+           (submod ".." gen))
 
   ;; --- helpers: read spines and indexes straight off string cuts ---
   (define (sides str i) (values (sexp-smr (substring str 0 i)) (sexp-smr (substring str i))))
   (define (front-of str i) (let-values ([(L R) (sides str i)])
-                             (let-values ([(f b) (fine@ L R)]) f)))
+                             (let-values ([(f b) (sand-spines L R)]) f)))
   (define (back-of  str i) (let-values ([(L R) (sides str i)])
-                             (let-values ([(f b) (fine@ L R)]) b)))
+                             (let-values ([(f b) (sand-spines L R)]) b)))
 
   ;; --- guide sign sweeps: every interior cut x every target, all-left,
   ;; all-right, AND the mixed anchor (right head over the left path) ---
   (define (sweep str targets)
     (for ([at targets])
-      (define-values (f b) (let-values ([(L R) (sides str at)]) (fine@ L R)))
+      (define-values (f b) (let-values ([(L R) (sides str at)]) (sand-spines L R)))
       (for ([ix (list f b (cons (car b) (cdr f)))])
         (for ([i (in-range 1 (string-length str))])
           (define-values (L R) (sides str i))
@@ -196,35 +253,45 @@
   (define (cuts rope ix)                  ; where a single index cuts, as strings
     (let-values ([(l r) ((multisect (vector (slot-guide ix))) rope)])
       (cons (~a l) (~a r))))
-  (define (doc z) (~a (focus (to-root z))))
+  (define (doc z) (~a (zipper-focus (to-root z))))
   (define rope ((make-rope sexp-smr) "(aa bb cc)"))
   (define ^bb (front-of "(aa bb cc)" 4))
   (define ^cc (front-of "(aa bb cc)" 7))
 
   (let ([z (cursor rope ^bb)])                       ; gap: replace at an empty focus = insert
-    (check-equal? (~a (focus z)) "")
-    (check-equal? (doc ((focus "xx ") z)) "(aa xx bb cc)"))
+    (check-equal? (~a (zipper-focus z)) "")
+    (check-equal? (doc ((zipper-focus "xx ") z)) "(aa xx bb cc)"))
+
+  ;; --- the same navigation through a BUNDLE rope: sexp guides read the sexp
+  ;; component out of each bundle value via (on sand-spines sexp-smr) ---
+  (let* ([cc    (make-summary string-length +)]
+         [b     (bundle sexp-smr cc)]
+         [brope ((make-rope b) "(aa bb cc)")]
+         [gs    (sexp-guides ^bb)]
+         [z     ((zipper-guide gs) (start b brope gs))])
+    (check-equal? (~a (zipper-focus z)) "")
+    (check-equal? (doc ((zipper-focus "xx ") z)) "(aa xx bb cc)"))
 
   (let ([z (cursor rope ^bb ^cc)])                   ; seg [^bb ^cc): half-open
-    (check-equal? (~a (focus z)) "bb ")
-    (check-equal? (doc ((focus "XX ") z)) "(aa XX cc)")
-    (check-equal? (doc ((focus "") z)) "(aa cc)")) ; the empty replace = delete
+    (check-equal? (~a (zipper-focus z)) "bb ")
+    (check-equal? (doc ((zipper-focus "XX ") z)) "(aa XX cc)")
+    (check-equal? (doc ((zipper-focus "") z)) "(aa cc)")) ; the empty replace = delete
 
   ;; back index navigates to the same place
-  (check-equal? (doc ((focus "xx ") (cursor rope (back-of "(aa bb cc)" 4))))
+  (check-equal? (doc ((zipper-focus "xx ") (cursor rope (back-of "(aa bb cc)" 4))))
                 "(aa xx bb cc)")
 
   ;; --- the end slot: slot N of an N-child frame is a real target; both
   ;; anchorings name it (front N | right -1) and appending lands tight after
   ;; the last child ---
-  (check-equal? (doc ((focus " dd") (cursor rope '(3 0))))  "(aa bb cc dd)")
-  (check-equal? (doc ((focus " dd") (cursor rope '(-1 0)))) "(aa bb cc dd)")
+  (check-equal? (doc ((zipper-focus " dd") (cursor rope '(3 0))))  "(aa bb cc dd)")
+  (check-equal? (doc ((zipper-focus " dd") (cursor rope '(-1 0)))) "(aa bb cc dd)")
   (let ([z (cursor ((make-rope sexp-smr) "(aa )") '(1 0))]) ; ws after the last child:
-    (check-equal? (~a z) "(aa‸ )"))                         ; the plateau lands at its left edge
+    (check-equal? (~a z) "(aa ‸)"))                         ; lands tight before the close (ws binds left)
 
   ;; --- navigation + editing, nested ---
   (define rope2 ((make-rope sexp-smr) "(aa (p q) cc)"))
-  (check-equal? (doc ((focus "xx ") (cursor rope2 (front-of "(aa (p q) cc)" 7))))
+  (check-equal? (doc ((zipper-focus "xx ") (cursor rope2 (front-of "(aa (p q) cc)" 7))))
                 "(aa (p xx q) cc)")
 
   ;; --- anchors: read both at the cursor, and they diverge under editing ---
@@ -232,7 +299,7 @@
                 [(front back) (anchors z 0)])
     (check-equal? front '(1 0))
     (check-equal? back  '(-3 0))                       ; right head over the left path
-    (define rope1 (focus (to-root ((focus "xx ") z))))
+    (define rope1 (zipper-focus (to-root ((zipper-focus "xx ") z))))
     (check-equal? (cuts rope1 front) (cons "(aa " "xx bb cc)"))  ; left-anchored: stays by aa
     (check-equal? (cuts rope1 back)  (cons "(aa xx " "bb cc)"))) ; right-anchored: stays by bb
 
@@ -243,7 +310,7 @@
                "( aa)" "(aa )")])
     (for ([i (in-range 1 (string-length str))])
       (define-values (L R) (sides str i))
-      (define-values (f b) (fine@ L R))
+      (define-values (f b) (sand-spines L R))
       (define m (modulus L R))
       (define mixed (cons (car b) (cdr f)))            ; the right-headed anchor
       (check-true (exact-integer? m) (format "~s cut ~a modulus ~s" str i m))
@@ -261,44 +328,124 @@
   (let* ([z     (cursor rope ^bb)]
          [back* ((flip (edge-modulus z 0)) ^bb)])
     (check-equal? back* '(-3 0))                       ; right head, path untouched
-    (check-equal? (doc ((focus "xx ") (cursor rope back*))) "(aa xx bb cc)")
-    (define rope1 (focus (to-root ((focus "xx ") z))))
+    (check-equal? (doc ((zipper-focus "xx ") (cursor rope back*))) "(aa xx bb cc)")
+    (define rope1 (zipper-focus (to-root ((zipper-focus "xx ") z))))
     (check-equal? (cuts rope1 ^bb)   (cons "(aa " "xx bb cc)"))
     (check-equal? (cuts rope1 back*) (cons "(aa xx " "bb cc)")))
 
   ;; --- the guide lens: an anchor flip installs and re-navigates to the SAME
   ;; gap (L2); editing afterwards behaves as the flipped family ---
   (let* ([z  (cursor rope ^bb)]
-         [zb ((guide (sexp-guides ((flip (edge-modulus z 0)) ^bb))) z)])
-    (check-equal? (~a (focus zb)) "")                          ; same gap at flip-time
-    (check-equal? (doc ((focus "xx ") zb)) "(aa xx bb cc)"))
+         [zb ((zipper-guide (sexp-guides ((flip (edge-modulus z 0)) ^bb))) z)])
+    (check-equal? (~a (zipper-focus zb)) "")                          ; same gap at flip-time
+    (check-equal? (doc ((zipper-focus "xx ") zb)) "(aa xx bb cc)"))
 
   ;; --- re-anchoring the END edge via the lens's modify face makes the cursor
   ;; edit-stable: it keeps covering the focus across replace and delete ---
   (let* ([z  (cursor rope ^bb ^cc)]                            ; both front: end drifts under edits
          [e* ((flip (edge-modulus z 1)) ^cc)]                  ; re-anchor the end's head on its right side
-         [z  ((guide (lambda (gs) (vector (vector-ref gs 0) (slot-guide e*)))) z)])
-    (check-equal? (~a (focus z)) "bb ")                        ; same seg at flip-time
-    (let ([z* ((focus "x1 x2 ") z)])
-      (check-equal? (~a (focus z*)) "x1 x2 ")                  ; replace re-navigated: still covering
+         [z  ((zipper-guide (lambda (gs) (vector (vector-ref gs 0) (slot-guide e*)))) z)])
+    (check-equal? (~a (zipper-focus z)) "bb ")                        ; same seg at flip-time
+    (let ([z* ((zipper-focus "x1 x2 ") z)])
+      (check-equal? (~a (zipper-focus z*)) "x1 x2 ")                  ; replace re-navigated: still covering
       (check-equal? (doc z*) "(aa x1 x2 cc)")
-      (let ([zg ((focus "") z*)])                            ; delete collapses to the gap
-        (check-equal? (~a (focus zg)) "")
-        (check-equal? (doc ((focus "yy ") zg)) "(aa yy cc)")))) ; and editing chains on
+      (let ([zg ((zipper-focus "") z*)])                            ; delete collapses to the gap
+        (check-equal? (~a (zipper-focus zg)) "")
+        (check-equal? (doc ((zipper-focus "yy ") zg)) "(aa yy cc)")))) ; and editing chains on
 
   ;; --- cover: flip the second guide; the right anchor stays fixed while the
   ;; stuff inside is edited ---
   (let* ([z  (cover (cursor rope2 (front-of "(aa (p q) cc)" 7)))] ; covered gap at ^q
-         [z1 ((focus "x ") z)]
-         [z2 ((focus "x y ") z1)]
-         [z3 ((focus "") z2)])
-    (check-equal? (~a (focus z1)) "x ")
+         [z1 ((zipper-focus "x ") z)]
+         [z2 ((zipper-focus "x y ") z1)]
+         [z3 ((zipper-focus "") z2)])
+    (check-equal? (~a (zipper-focus z1)) "x ")
     (check-equal? (doc z1) "(aa (p x q) cc)")
-    (check-equal? (~a (focus z2)) "x y ")
+    (check-equal? (~a (zipper-focus z2)) "x y ")
     (check-equal? (doc z2) "(aa (p x y q) cc)")    ; the interior grew: q held its ground
-    (check-equal? (~a (focus z3)) "")
+    (check-equal? (~a (zipper-focus z3)) "")
     (check-equal? (doc z3) "(aa (p q) cc)"))       ; and shrank back to the gap
 
   (let* ([z (cover (cursor rope ^bb ^cc))])        ; a seg, covered by the same mechanism
-    (check-equal? (~a (focus z)) "bb ")
-    (check-equal? (doc ((focus "b1 (b2 b3) ") z)) "(aa b1 (b2 b3) cc)")))
+    (check-equal? (~a (zipper-focus z)) "bb ")
+    (check-equal? (doc ((zipper-focus "b1 (b2 b3) ") z)) "(aa b1 (b2 b3) cc)"))
+
+  ;; ========================================================================
+  ;; Document isos -- the tree-first scaffolding for the index battery.
+  ;; Three genuine isos over the document's states (helper-algebras' `iso`):
+  ;;   A  shape  <-> spines   (structure; fold / unfold)
+  ;;   C  tree   <-> pieces   (content;   tokenize / parse)
+  ;;   B  pieces <-> text     (text;      concat / lex)
+  ;; tree rep: atom = string, frame = (list child ...); a bare shape uses () for
+  ;; atoms.  The generator draws a bare shape, then populates atoms into it.
+  ;; (The guide-driven bridge -- spines locating the cuts in the text -- is the
+  ;; next step; these three isos are the free scaffolding it gets checked against.)
+
+  ;; -- helpers --
+  (define (map-group-by pairs)             ; group by car, collect cdrs, key order
+    (for/list ([g (in-list (group-by car (sort pairs < #:key car)))]) (map cdr g)))
+  (define (unfold-tree coalg seed)         ; labelless rose-tree anamorphism
+    (map (lambda (s) (unfold-tree coalg s)) (coalg seed)))
+  (define (blank? p) (regexp-match? #px"^\\s*$" p))
+
+  ;; -- A: shape <-> spines (fold / unfold) --
+  (define (shape->spines t [ix '(0)])
+    (if (null? t)
+        (list ix)
+        (cons ix (append* (for/list ([c (in-list t)] [j (in-naturals)])
+                            (shape->spines c (cons j ix)))))))
+  (define (spines->shape sps)
+    (unfold-tree (lambda (ps) (map-group-by (filter pair? ps)))
+                 (map (lambda (s) (cdr (reverse s))) sps)))
+  (define shape<->spines (iso shape->spines spines->shape))
+
+  ;; -- C: tree <-> pieces (tokenize / parse) --
+  (define (tree->pieces t)
+    (if (string? t)
+        (list t)
+        (append (list "(")
+                (append* (add-between (map tree->pieces t) (list " ")))
+                (list ")"))))
+  (define (pieces->tree pieces)
+    (define (parse ts)
+      (match ts
+        [(cons "(" rest)
+         (let loop ([ts rest] [kids '()])
+           (match ts
+             [(cons ")" rest) (values (reverse kids) rest)]
+             [_ (define-values (k rest*) (parse ts)) (loop rest* (cons k kids))]))]
+        [(cons atom rest) (values atom rest)]))
+    (define-values (t _) (parse (filter (lambda (p) (not (blank? p))) pieces)))
+    t)
+  (define tree<->pieces (iso tree->pieces pieces->tree))
+
+  ;; -- B: pieces <-> text (concat / lex) --
+  (define (pieces->text pieces) (apply string-append pieces))
+  (define (text->pieces s) (regexp-match* #px"[()]|[^()\\s]+|\\s+" s))
+  (define pieces<->text (iso pieces->text text->pieces))
+
+  ;; -- generator: gen:shape / gen:atom / gen:populate live in the `gen`
+  ;;    submodule (required above); gen:tree composes them at the test's params --
+  (define gen:tree (gen:bind (gen:shape 4 3) gen:populate))
+
+  ;; -- the isos round-trip: worked examples, a curated corpus, and randomly --
+  (check-equal? (shape->spines '(() (() ()) ())) '((0) (0 0) (1 0) (0 1 0) (1 1 0) (2 0)))
+  (check-equal? (tree->pieces '("f" ("g" "x") "y"))
+                '("(" "f" " " "(" "g" " " "x" ")" " " "y" ")"))
+  (check-equal? (text->pieces "(f (g x) y)")
+                '("(" "f" " " "(" "g" " " "x" ")" " " "y" ")"))
+
+  (define shape-corpus (list '() '(()) '(() ()) '(() (() ()) ()) '((()) ())))
+  (define tree-corpus
+    (list "x" '("a" "b") '("f" ("g" "x") "y") '(("a")) '()
+          '("define" ("f" "x") ("+" "x" "1"))))
+  (check-equal? (check-iso-laws shape<->spines shape-corpus) '())
+  (check-equal? (check-iso-laws tree<->pieces tree-corpus) '())
+  (check-equal? (check-iso-laws pieces<->text (map tree->pieces tree-corpus)) '())
+
+  (check-property (make-config) (property ([s (gen:shape 4 3)])
+                                  (check-true (iso-law? shape<->spines s))))
+  (check-property (make-config) (property ([t gen:tree])
+                                  (check-true (iso-law? tree<->pieces t))))
+  (check-property (make-config) (property ([t gen:tree])
+                                  (check-true (iso-law? pieces<->text (tree->pieces t))))))
