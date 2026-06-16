@@ -2,83 +2,47 @@
 
 ;; Sexp navigation + editing on the summarised rope, on SIGNED SPINE indexes.
 ;;
-;; An index is a spine: the per-level position list, innermost-first, read straight
-;; off the signed frontier summary (summaries.rkt).  Slots are 0-BASED at every
-;; level.  EACH COMPONENT picks the side it reads at its level: >= -1/2 against
-;; the 0-based slot read (sub1'd opens ++ [forms]) of the before summary
-;; (left-based, from the text to the left), <= -1 against (closes ++ [-(forms+1)])
-;; of the after summary (right-based, from the text to the right; -1 = after the
+;; An index is a spine: the per-level position list, innermost-first.  Slots are
+;; 0-BASED at every level.  EACH COMPONENT picks the side it reads at its level:
+;; >= -1/2 against the all-left `front` spine, <= -1 against the all-right `back`
+;; spine -- the pair `sand-spines` reads at a cut (summaries.rkt; -1 = after the
 ;; last form).  The two ANCHORS of a position differ in the HEAD only: the path
 ;; down to the cut's frame is a left-based name either way, and the head is
 ;; anchored left or right within that frame -- `anchors` returns exactly this
 ;; pair, and re-deriving the other head at a cursor IS the anchor flip
 ;; (head-only, by one modulus).
 ;;
-;; `sand-spines` reads the all-left and all-right spines at a cut, with the ½ refinement
-;; on the HEAD only: at a form start the head is the raw integer; mid-atom it is
-;; pushed half-way into the atom (the one structurally invisible interior --
-;; frames' interiors are spine-visible as depth, atoms' are not); whitespace binds
-;; to the previous form, leaning -½.  Under completion counting an open frame's interior
-;; is a prefix extension of the frame's own start slot, so `spine-cmp` is NAIVELY
-;; lexicographic: pad with -inf (a bare spine bottoms out before everything
-;; deeper), read each level off the spine the index's component selects, and take
-;; the first non-zero componentwise verdict.  Targets land on form starts AND on
-;; frames' END SLOTS -- slot N of an N-child frame: the cut right before the close
-;; (head class `close`) reads integer on both sides.  `cut-kind` decides a cut from
-;; the two char-classes touching it (tail of L, head of R), so the end slot is the
-;; close-adjacent cut, not its leading whitespace.  A guide is one comparison.
+;; `spine-cmp` compares an index against a cut's (front, back) spines.  Under
+;; completion counting an open frame's interior is a prefix extension of the
+;; frame's own start slot, so the comparison is lexicographic (helper-algebras'
+;; `lexicographic`, outermost-first): read each level off the spine the index's
+;; component selects (front for >= -1/2, back for <= -1) and take the first
+;; non-zero componentwise verdict; a shorter spine sorts before a deeper one (a
+;; bare spine sits before everything deeper inside it -- the early exit that
+;; replaced the -inf padding).  Targets land on form starts AND on frames' END
+;; SLOTS -- slot N of an N-child frame.  A guide is one comparison.
 ;;
-;; The layer is three reads and a comparison: everything else is zipper-core.
+;; The layer is a comparison over the spines `sand-spines` reads (summaries.rkt):
+;; everything else is zipper-core.
 
 (require racket/match
-         srfi/41                ; variadic lazy streams: stream-map/constant/->list
          "rope-core.rkt"        ; make-rope multisect frame
-         "summaries.rkt"        ; sexp-smr + the frontier readers; bundle
+         "summaries.rkt"        ; sexp-smr, sand-spines; bundle
          "zipper-core.rkt"      ; start zipper-guide zipper-focus to-root on-edges
-         "helper-algebras.rkt") ; on -- projects a guide/reader onto a bundle component
+         "helper-algebras.rkt") ; on (bundle projection); lexicographic (spine-cmp)
 
-(provide sand-spines            ; (sand-spines L R) -> (values front-spine back-spine)
-         spine-cmp              ; (spine-cmp front back index) -> -1 | 0 | 1
-         slot-guide             ; (slot-guide index) -> guide; components pick their side
+(provide spine-cmp              ; (spine-cmp front back index) -> -1 | 0 | 1
+         slot-guide guide-index ; (slot-guide index) -> guide (carries its index)
          modulus base-left base-right flip  ; re-basing: head-only, by one modulus
          sexp-guides cursor     ; cursor conveniences over zipper-core
          edge-contexts anchors edge-modulus
          re-anchor cover        ; the anchor flip as a cursor operation
-         pure move spread       ; command vocabulary: lift, cursor verbs (chain re-exported from zipper-core)
+         at move spread both slot lift  ; edit verbs: vector -> vector, into zipper-guide (chain re-exported)
          (all-from-out "rope-core.rkt")
          (all-from-out "summaries.rkt")
          (all-from-out "zipper-core.rkt"))
 
-;; ---------- the cut reads ----------
-;; classify a cut by the two char-classes touching it: tail of L, head of R.
-;;   start  a form begins here (atom or "(")        -- flush, no lean
-;;   end    right before a ")" or the document end  -- flush, no lean
-;;   mid    straddling an atom                       -- front -½, back +½
-;;   lean   whitespace; binds to the previous form   -- front -½, back -½
-(define (cut-kind L R)
-  (case (sexp-head R)
-    [(atom)  (if (eq? (sexp-tail L) 'atom) 'mid 'start)]
-    [(open)  'start]
-    [(close) 'end]
-    [(ws)    'lean]
-    [else    'end]))                       ; R empty: the document end
-
-;; both full spines at a cut, innermost-first, ½ baked into the heads; front
-;; slots 0-based (the stored +1 drops at the read), back as stored.
-(define (sand-spines L R)
-  (match-define (cons fh fr) (append (map sub1 (sexp-opens L)) (list (sexp-forms L))))
-  (match-define (cons bh br) (append (sexp-closes R) (list (- (add1 (sexp-forms R))))))
-  (case (cut-kind L R)
-    [(start end) (values (cons fh fr)        (cons bh br))]
-    [(mid)       (values (cons (- fh 1/2) fr) (cons (+ bh 1/2) br))]
-    [(lean)      (values (cons (- fh 1/2) fr) (cons (- bh 1/2) br))]))
-
 ;; ---------- the comparison ----------
-;; spine -> outermost-first component stream, -inf forever after (a bare spine --
-;; the frame's own start slot -- sits before everything deeper inside it).
-(define (spine->stream s)
-  (stream-append (list->stream (reverse s)) (stream-constant -inf.0)))
-
 ;; the ordinary 3-way order: -1 if a<b, +1 if a>b, 0 equal.
 (define (component-cmp a b) (cond [(< a b) -1] [(> a b) 1] [else 0]))
 
@@ -87,29 +51,29 @@
 ;; an open paren).  The half-step gap keeps the families disjoint.
 (define (back-component? c) (< c -1/2))
 
-;; each component of the index picks the spine it reads against -- per-level
-;; anchoring, so all-left, all-right, and mixed indexes resolve uniformly.
-;; target vs cut (index component first), so +1 = target right of the cut.
-(define (pick-cmp f b c) (component-cmp c (if (back-component? c) b f)))
+;; an index component vs a cut element -- its (front . back) pair -- to a sign;
+;; the component picks its own anchoring (front >= -1/2, back <= -1), so all-left,
+;; all-right, and mixed indexes resolve uniformly.  Index first, so +1 = target
+;; right of the cut.
+(define (cut-cmp c fb) (component-cmp c (if (back-component? c) (cdr fb) (car fb))))
 
-;; the verdict stream is read one past the longer spine: both sides are -inf
-;; padding from there on, so an all-zero prefix means the cut IS the target.
+;; zip the two co-indexed spines into one cut, then compare an index against it
+;; lexicographically, outermost-first; a shorter spine sorts before a deeper one
+;; (a bare spine sits before everything deeper inside it).
 (define (spine-cmp front back ix)         ; -> +1 boundary right of cut / 0 / -1
-  (define n (add1 (max (length front) (length ix))))
-  (or (findf (negate zero?)
-             (stream->list n (stream-map pick-cmp
-                                         (spine->stream front)
-                                         (spine->stream back)
-                                         (spine->stream ix))))
-      0))
+  ((lexicographic cut-cmp) (reverse ix) (reverse (map cons front back))))
 
 ;; ---------- the guide ----------
-;; one comparison; each component of the index picks its own side, split by
-;; `back-component?` at the half-step gap (front >= -1/2, back <= -1, leans
-;; included).
-(define ((slot-guide ix) L R)
-  (define-values (front back) ((on sand-spines sexp-smr) L R))
-  (spine-cmp front back ix))
+;; A guide carries its index: callable as the comparator (one comparison; each
+;; component of the index picks its own side, split by `back-component?` at the
+;; half-step gap -- front >= -1/2, back <= -1, leans included), AND readable as
+;; the index, so the edit verbs operate on the cursor vector directly without
+;; re-deriving from the zipper.
+(struct guide (index proc) #:property prop:procedure (struct-field-index proc))
+(define (slot-guide ix)
+  (guide ix (lambda (L R)
+              (let-values ([(front back) ((on sand-spines sexp-smr) L R)])
+                (spine-cmp front back ix)))))
 
 ;; ---------- cursor conveniences ----------
 (define (sexp-guides s [e s]) (vector (slot-guide s) (slot-guide e)))
@@ -174,23 +138,26 @@
 (define (cover z) (re-anchor z 1 'back))
 
 ;; ---------- command vocabulary ----------
-;; A command is a zipper -> zipper (the cursor write faces already are).  `pure`
-;; lifts a value to a constant function (an absolute argument); `move`/`spread`
-;; are the cursor verbs.  (`chain`, the trace pipe, lives in zipper-core and is
-;; re-exported here.)
-(define ((pure x) _) x)
+;; The cursor verbs operate directly on the guide vector: each guide is its own
+;; index (above), so a verb reads the index off the guide, maps it, and rebuilds
+;; -- no `anchors`, no zipper.  Each is a plain vector -> vector (or a vector
+;; value) that slots into `zipper-guide`'s existing modify / install faces, e.g.
+;; ((zipper-guide (move f)) z).  (`chain`, the trace pipe, is re-exported from
+;; zipper-core.)
+;;
+;; `lift` is the one bridge -- an index function (ix -> ix) becomes a guide
+;; function; `gap-at` collapses to a gap at an index.  `slot` is the index-level
+;; helper: map the innermost slot, the frame (cdr) untouched, so each edge stays
+;; in its own sexp.
+(define ((lift f) g)  (slot-guide (f (guide-index g))))
+(define (gap-at i)    (let ([g (slot-guide i)]) (vector g g)))
+(define ((slot h) ix) (cons (h (car ix)) (cdr ix)))
 
-;; move: reposition to a gap at (f current-index) -- whole-index, so f can change level.
-(define ((move f) z)
-  (let-values ([(ix _) (anchors z 0)])
-    ((zipper-guide (sexp-guides (f ix))) z)))
-
-;; spread: transform the two edges' innermost slots, each by a function on its number
-;; (the cdr -- the frame -- is untouched, so each edge stays in its own sexp).
-(define ((spread fl fr) z)
-  (let-values ([(s _s) (anchors z 0)] [(e _e) (anchors z 1)])
-    ((zipper-guide (sexp-guides (cons (fl (car s)) (cdr s))
-                                (cons (fr (car e)) (cdr e)))) z)))
+(define (both   f)     (lambda (gs) (vector-map (lift f) gs)))             ; map both edges
+(define (spread fl fr) (lambda (gs) (vector ((lift fl) (vector-ref gs 0))  ; map each edge
+                                            ((lift fr) (vector-ref gs 1)))))
+(define (move   f)     (lambda (gs) (gap-at (f (guide-index (vector-ref gs 0)))))) ; -> gap at (f start)
+(define (at     ix)    (lambda (_)  (gap-at ix)))                          ; absolute gap
 
 ;; ============================================================================
 ;; Tree generators -- in their own submodule, so they import without dragging in
@@ -369,6 +336,19 @@
   (let* ([z (cover (cursor rope ^bb ^cc))])        ; a seg, covered by the same mechanism
     (check-equal? (~a (zipper-focus z)) "bb ")
     (check-equal? (doc ((zipper-focus "b1 (b2 b3) ") z)) "(aa b1 (b2 b3) cc)"))
+
+  ;; --- the edit verbs: each is a vector -> vector (or vector value) through
+  ;; zipper-guide's existing faces, reading the index straight off the guide.
+  ;; (indexes in "(aa bb cc)": ^bb = '(1 0), ^cc = '(2 0), end slot = '(3 0))
+  (let ([z (cursor rope '(1 0))])                  ; a gap before bb
+    (check-equal? (doc ((zipper-focus "xx ") ((zipper-guide (at '(2 0))) z)))         ; absolute
+                  "(aa bb xx cc)")
+    (check-equal? (doc ((zipper-focus "xx ") ((zipper-guide (move (slot add1))) z)))  ; advance one slot
+                  "(aa bb xx cc)")
+    (check-equal? (~a (zipper-focus ((zipper-guide (spread values (slot add1))) z)))  ; open gap -> seg
+                  "bb "))
+  (let ([z (cursor rope '(1 0) '(2 0))])           ; a seg [bb, cc) = "bb "
+    (check-equal? (~a (zipper-focus ((zipper-guide (both (slot add1))) z))) "cc"))    ; shift both edges
 
   ;; ========================================================================
   ;; Document isos -- the tree-first scaffolding for the index battery.

@@ -272,24 +272,25 @@
 ;; those boundary leaves (string-length is O(1)) -- the only place it is needed, now
 ;; that nodes cache leaf count, not char size. Balance-dumb: shape is bisect's job.
 (define ((concat-rope smr) . ropes)
-  (letrec ([mt   (empty-rope smr)]
-           [br   (branch-rope smr)]
-           [fuse (lambda (l r) ((leaf-rope smr) (string-append (leaf-text l) (leaf-text r))))]
-           [chars (lambda (lf) (string-length (leaf-text lf)))]    ; O(1); only at the seam
-           [join (match-lambda**
-                  [((== mt) r) r]                                   ; empties drop
-                  [(l (== mt)) l]
-                  [((? leaf? l) (? leaf? r))                        ; two leaves at the seam:
-                   (if (<= (+ (chars l) (chars r)) max-leaf)
-                       (fuse l r)                                   ;   fuse if they fit,
-                       (br l r))]                                   ;   else branch
-                  [((branch _ _ _ _ ll lr) r)                       ; small right LEAF tip of l
-                   #:when (and (leaf? lr) (< (chars lr) max-leaf))
-                   (br ll (join lr r))]
-                  [(l (branch _ _ _ _ rl rr))                       ; small left LEAF tip of r
-                   #:when (and (leaf? rl) (< (chars rl) max-leaf))
-                   (br (join l rl) rr)]
-                  [(l r) (br l r)])])
+  (let ([mt    (empty-rope smr)]
+        [br    (branch-rope smr)]
+        [fuse  (lambda (l r) ((leaf-rope smr) (string-append (leaf-text l) (leaf-text r))))]
+        [chars (lambda (lf) (string-length (leaf-text lf)))])    ; O(1); only at the seam
+    (define join
+      (match-lambda**
+       [((== mt) r) r]                                   ; empties drop
+       [(l (== mt)) l]
+       [((? leaf? l) (? leaf? r))                        ; two leaves at the seam:
+        (if (<= (+ (chars l) (chars r)) max-leaf)
+            (fuse l r)                                   ;   fuse if they fit,
+            (br l r))]                                   ;   else branch
+       [((branch _ _ _ _ ll lr) r)                       ; small right LEAF tip of l
+        #:when (and (leaf? lr) (< (chars lr) max-leaf))
+        (br ll (join lr r))]
+       [(l (branch _ _ _ _ rl rr))                       ; small left LEAF tip of r
+        #:when (and (leaf? rl) (< (chars rl) max-leaf))
+        (br (join l rl) rr)]
+       [(l r) (br l r)]))
     (foldr join mt ropes)))
 
 (define (chunk-string text n)

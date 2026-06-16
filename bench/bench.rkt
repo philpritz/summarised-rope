@@ -187,7 +187,10 @@
     (define t0 (current-inexact-milliseconds))
     (define r  (doubled d))
     (define t1 (current-inexact-milliseconds))
-    (define forms  (sexp-forms (sexp-smr r)))         ; 12*2^d, read O(1) off the cache
+    ;; the form count, read O(1) off the cache: the outermost slot of the front
+    ;; spine at the document end is the top-level form count (12*2^d)
+    (define forms
+      (let-values ([(front _) (sand-spines (sexp-smr r) (sexp-smr ""))]) (last front)))
     (define target (list (quotient forms 2)))         ; the middle top-level form
     (define counter (box 0))
     (define gs (counting (sexp-guides target) counter))

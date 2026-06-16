@@ -101,6 +101,12 @@
         (match* ((gs mt t) (gs lt rt) (ge lt rt) (ge t mt))  ; left edge | seam | seam | right edge
           [(-1 _ _ _) (error 'toward "start precedes the focus -- ascend further")]
           [(_ _ _ 1)  (error 'toward "end follows the focus -- ascend further")]
+          ;; PROVISIONAL crossing guard (proper home TBD; twinned in `carve`).
+          ;; start right of the seam AND end left of it -> the cursor is crossed.
+          ;; Cannot fire for a well-ordered cursor: start right of a seam forces
+          ;; end >= start also right of it.  Early/partial -- only when the edges
+          ;; separate at a node seam; a within-leaf cross is caught by `carve`.
+          [(_ 1 -1 _) (error 'toward "crossed cursor -- end precedes start")]
           [(_ 1 _ _)  (into (lambda (_) (values lt rt mt)))] ; whole seg right of seam -> lt | rt | ()
           [(_ _ -1 _) (into (lambda (_) (values mt lt rt)))] ; whole seg left  of seam -> () | lt | rt
           [(_ _ _ _)  (values h k)]))))                      ; straddle / gap / boundary -> halt
@@ -114,8 +120,17 @@
 ;; carve: cut the focus at the 2 boundaries via multisect (guides framed by the head's
 ;; context), middle piece -> focus (empty = gap).
 (define ((carve smr guides) h k)
-  (match-define (head b _ a) h)
-  (let-values ([(h* c) ((lens smr) (multisect (vector-map (frame smr b a) guides)) h)])
+  (match-define (head b t a) h)
+  (match-define (vector gs ge) (vector-map (frame smr b a) guides))
+  ;; PROVISIONAL crossing guard (proper home TBD; twinned in `toward`).  Cut the
+  ;; focus at the start boundary and read the end guide there: -1 means the end
+  ;; precedes the start (a crossed cursor).  0 (a gap) and +1 (a seg) are fine.
+  ;; This is the catch-all -- it sees the exact char cut, so it also rejects a
+  ;; cross within a single leaf, which `toward`'s seam test cannot.
+  (let-values ([(ls rest) ((multisect (vector gs)) t)])
+    (when (negative? (ge ls rest))
+      (error 'carve "crossed cursor -- end precedes start")))
+  (let-values ([(h* c) ((lens smr) (multisect (vector gs ge)) h)])
     (values h* (cons c k))))
 
 ;; navigate: the navigation pipeline as ONE op -- ascend, then descend, then carve.
@@ -313,4 +328,11 @@
   (check-equal? (~a ((zipper-focus "HI") ((zipper-guide (seg 0 5)) z0)))    ; navigated cursor shows
                 "⟦HI wo⟧rld")
   (let ([z ((zipper-guide (gap 6)) (start cc ((make-rope cc) "ab\ncd\nef") (gap 0)))])
-    (check-equal? (~a z) "ab\ncd\n‸ef")))                     ; marks sit at the cut, multi-line
+    (check-equal? (~a z) "ab\ncd\n‸ef"))                      ; marks sit at the cut, multi-line
+
+  ;; --- PROVISIONAL crossing guard: a cursor whose end precedes its start is
+  ;; rejected at navigation.  Lives in BOTH `carve` and `toward` for now; the
+  ;; single proper home is still to be settled.
+  (check-exn #rx"crossed cursor" (lambda () ((zipper-guide (seg 5 2)) z0)))   ; start past end
+  (check-not-exn (lambda () ((zipper-guide (gap 5)) z0)))     ; a gap (start = end) is not crossed
+  (check-not-exn (lambda () ((zipper-guide (seg 2 5)) z0))))  ; an ordered seg is not crossed

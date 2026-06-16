@@ -2,8 +2,10 @@
 
 ;; Summaries: the general summary combinators plus the concrete summary algebras.
 ;; The general piece is `bundle` (a product of summaries -- see below); the rest of
-;; the file is the sexp instance.  The summary *protocol* (make-summary and the
-;; gen:summary-part extension point) lives in rope-core; this file builds on it.
+;; the file is the sexp instance: its monoid (`sexp-smr`) AND the navigation read
+;; interface `sand-spines`, which reads a cut as the front/back spines the sexp
+;; layer compares against (sexp-edit.rkt).  The summary *protocol* (make-summary and
+;; the gen:summary-part extension point) lives in rope-core; this file builds on it.
 ;;
 ;; Sexp summary: the opens/closes frontier algebra as a SIGNED struct, for the current
 ;; rope-core (`make-summary`).  Two storage decisions distinguish it from the 7-list
@@ -39,12 +41,7 @@
 (provide bundle                    ; (bundle s1 s2 ...) -> the product smr
          (struct-out bundle-val)   ; the product summary value
          sexp-smr                  ; the smr  -- (sexp-smr str), ((make-rope sexp-smr) ...)
-         sexp-leaf sexp+           ; the algebra (leaf measure, combine)
-         (struct-out frontier)     ; the summary value
-         ;; #f-safe readers (#f is the empty/identity summary)
-         sexp-opens sexp-closes sexp-forms
-         sexp-head sexp-tail
-         sexp-starts-atom? sexp-starts-form? sexp-ends-atom? sexp-ends-form?)
+         sand-spines)              ; (sand-spines L R) -> (values front back): read a cut as spines
 
 ;; ---------- bundle: a product of summaries ----------
 ;; (bundle s1 s2 ...) -> the product smr; build & stamp ropes under it.  Its value
@@ -182,12 +179,38 @@
 (define (sexp-forms  s) (if s (frontier-forms  s) 0))
 (define (sexp-head s) (and s (frontier-head s)))   ; class of first char, #f if empty
 (define (sexp-tail s) (and s (frontier-tail s)))   ; class of last char,  #f if empty
-;; the edge predicates, rederived from the head/tail classes (#f-safe: an empty
-;; summary has #f head/tail, so every predicate is #f).
-(define (sexp-starts-atom? s) (eq? (sexp-head s) 'atom))
-(define (sexp-starts-form? s) (case (sexp-head s) [(atom open)  #t] [else #f]))
-(define (sexp-ends-atom?   s) (eq? (sexp-tail s) 'atom))
-(define (sexp-ends-form?   s) (case (sexp-tail s) [(atom close) #t] [else #f]))
+;; ---------- reading a cut as spines ----------
+;; `sand-spines` is the summary's read interface for navigation -- the one reader
+;; of the frontier fields it needs.  At a cut it reads the all-left `front` and
+;; all-right `back` spines, innermost-first, with the ½ refinement on the HEAD
+;; only: at a form start the head is the raw integer; mid-atom it is pushed
+;; half-way into the atom (the one structurally invisible interior -- frames'
+;; interiors are spine-visible as depth, atoms' are not); whitespace binds to the
+;; previous form, leaning -½.  `front` slots are 0-based (the stored +1 drops at
+;; the read), `back` as stored (-1 = after the last form).  The spine algebra that
+;; compares against these lives in sexp-edit.rkt.
+
+;; classify a cut by the two char-classes touching it: tail of L, head of R.
+;;   start  a form begins here (atom or "(")        -- flush, no lean
+;;   end    right before a ")" or the document end  -- flush, no lean
+;;   mid    straddling an atom                       -- front -½, back +½
+;;   lean   whitespace; binds to the previous form   -- front -½, back -½
+(define (cut-kind L R)
+  (case (sexp-head R)
+    [(atom)  (if (eq? (sexp-tail L) 'atom) 'mid 'start)]
+    [(open)  'start]
+    [(close) 'end]
+    [(ws)    'lean]
+    [else    'end]))                       ; R empty: the document end
+
+;; both full spines at a cut, innermost-first, ½ baked into the heads.
+(define (sand-spines L R)
+  (match-define (cons fh fr) (append (map sub1 (sexp-opens L)) (list (sexp-forms L))))
+  (match-define (cons bh br) (append (sexp-closes R) (list (- (add1 (sexp-forms R))))))
+  (case (cut-kind L R)
+    [(start end) (values (cons fh fr)        (cons bh br))]
+    [(mid)       (values (cons (- fh 1/2) fr) (cons (+ bh 1/2) br))]
+    [(lean)      (values (cons (- fh 1/2) fr) (cons (- bh 1/2) br))]))
 
 ;; ============================================================================
 (module+ test
@@ -220,10 +243,15 @@
   (check-equal? (car (opens  "(aa "))   2)
   (check-equal? (car (closes "bb cc)")) -3)
 
-  ;; --- flags ---
-  (check-true  (sexp-ends-atom?   (sexp-smr "(aa bb cc")))
-  (check-true  (sexp-starts-form? (sexp-smr "(p q) cc)")))
-  (check-false (sexp-starts-form? (sexp-smr ") cc)")))
+  ;; --- head/tail char classes ---
+  (check-eq? (sexp-tail (sexp-smr "(aa bb cc")) 'atom)
+  (check-eq? (sexp-head (sexp-smr "(p q) cc)")) 'open)
+  (check-eq? (sexp-head (sexp-smr ") cc)")) 'close)
+
+  ;; --- sand-spines: read a cut as front/back spines (the navigation interface) ---
+  (let-values ([(front back) (sand-spines (sexp-smr "(aa ") (sexp-smr "bb cc)"))])
+    (check-equal? front '(1 0))      ; ^bb: child 1 at the top, slot 0 within
+    (check-equal? back  '(-3 -2)))
 
   ;; --- associativity: k-char pieces combine to the whole-string summary ---
   ;; (the real test of the signed completion-counting merge -- the variadic

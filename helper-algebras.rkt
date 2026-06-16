@@ -19,7 +19,8 @@
          iso-law?                ; (iso-law? i x): does x round-trip through i?
          check-iso-laws          ; (check-iso-laws i xs): the inputs that don't
          on                      ; (on op f): op on its args, each projected through f
-         fixed)                   ; (fixed improve [good-enough?]): iterate to a fixed point
+         fixed                   ; (fixed improve [good-enough?]): iterate to a fixed point
+         lexicographic)          ; ((lexicographic cmp) l1 l2): first-difference 3-way order
 
 ;; an iso is a focused pair; `prop:procedure` runs the focused (forward) side, so
 ;; an iso IS a function when called -- only its own combinators see the extra half.
@@ -66,6 +67,17 @@
   (let loop ([xs xs])
     (define ys (apply (compose list improve) xs))   ; improve's values, listed
     (if (good-enough? xs ys) (apply values ys) (loop ys))))
+
+;; `lexicographic`: lift an element comparison to a 3-way order on sequences.
+;; Walk two lists in parallel; the first non-zero elementwise verdict (`cmp` ->
+;; {-1,0,1}) decides.  If they agree up to the shorter, the shorter is the lesser
+;; -- a prefix precedes its extension.  ((lexicographic cmp) l1 l2) -> {-1,0,1}.
+(define ((lexicographic cmp) xs ys)
+  (let loop ([xs xs] [ys ys])
+    (cond [(null? xs) (if (null? ys) 0 -1)]
+          [(null? ys) 1]
+          [else (let ([v (cmp (car xs) (car ys))])
+                  (if (zero? v) (loop (cdr xs) (cdr ys)) v))])))
 
 ;; ============================================================================
 (module+ test
