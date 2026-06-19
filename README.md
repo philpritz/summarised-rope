@@ -13,8 +13,7 @@ summary-laws.rkt  optional law battery for summary writers (needs rackcheck)
 ```
 
 `design-notes/` and `discussions/` hold the rationale (dated, decision-level);
-`deprecated*/` are earlier generations kept for reference; `future/` parked
-directions.
+`deprecated*/` are earlier generations kept for reference.
 
 ## The pieces
 
@@ -30,11 +29,11 @@ context into a guide.
 
 A string summarises to a signed frontier: `opens` — one `+(k+1)` per unclosed
 open, innermost-first — `closes` (`−(k+1)`), `forms` (completed forms), and the
-seam flags (`starts/ends-atom?`, `starts/ends-form?`). The combine is
-associative (battery-tested across chunkings), so summaries merge across any
-split. Counting is by completion: a frame counts on its enclosing level at its
-`)`, which makes spine comparison naively lexicographic. The summary fn is
-`sexp-smr`.
+`head`/`tail` char classes (`'atom | 'open | 'close | 'ws`) of the fragment's
+first and last chars. The combine is associative (battery-tested across
+chunkings), so summaries merge across any split. Counting is by completion: a
+frame counts on its enclosing level at its `)`, which makes spine comparison
+naively lexicographic. The summary fn is `sexp-smr`.
 
 ### zipper-core
 
@@ -47,13 +46,13 @@ end)`; a gap is `start = end` (empty focus), a seg is `start < end`.
 Surface — five names:
 
 - `start` — a zipper over a rope, no guides installed yet.
-- `guide` — the three-faced navigation accessor on the installed pair: `(guide
-  z)` reads; `((guide gs) z)` installs a 2-vector; `((guide f) z)` installs
-  `(f current)`.
-- `focus` — the three-faced editing accessor on the content: `(focus z)` reads
-  the focus rope; `((focus c) z)` swaps in content (string or rope); `((focus
-  f) z)` swaps in `(f current)`. `delete` is `((focus "") z)`; insert is a swap
-  at a gap.
+- `zipper-guide` — the three-faced navigation accessor on the installed pair:
+  `(zipper-guide z)` reads; `((zipper-guide gs) z)` installs a 2-vector;
+  `((zipper-guide f) z)` installs `(f current)`.
+- `zipper-focus` — the three-faced editing accessor on the content:
+  `(zipper-focus z)` reads the focus rope; `((zipper-focus c) z)` swaps in
+  content (string or rope); `((zipper-focus f) z)` swaps in `(f current)`.
+  `delete` is `((zipper-focus "") z)`; insert is a swap at a gap.
 - `to-root` — fold the crumbs back into the whole document.
 - `on-edges` — `((on-edges c f g) z)`: the cursor's two edge cuts — the focus
   folded onto the side each edge doesn't face — spread over `f` and `g` and
@@ -73,7 +72,7 @@ An index is a **spine**: the per-level slot list, innermost-first, read straight
 off the frontier. The head's sign picks the **family**: a *front* index (head
 ≥ −½) is derived only from the text to its left; a *back* index (head ≤ −1) only
 from the text to its right. Both name the same position on the present text;
-under edits each follows its own side. `fine@` reads both spines at a cut;
+under edits each follows its own side. `sand-spines` reads both spines at a cut;
 `slot-guide` turns an index into a guide, sign-dispatched; `cursor` navigates a
 fresh zipper to one or two indexes.
 
@@ -100,15 +99,15 @@ insert, and the operation is idempotent.
 
 (define text "(aa (p q) cc)")
 (define-values (^q _)                       ; front spine at the cut before q
-  (fine@ (sexp-smr (substring text 0 7)) (sexp-smr (substring text 7))))
+  (sand-spines (sexp-smr (substring text 0 7)) (sexp-smr (substring text 7))))
 
 (define z  (cover (cursor ((make-rope sexp-smr) text) ^q)))   ; covered gap at ^q
-(define z1 ((focus "x ") z))
-(~a (focus z1))             ; "x "  with its trailing space -- the cursor covers it
-(~a (focus (to-root z1)))   ; "(aa (p x q) cc)"
+(define z1 ((zipper-focus "x ") z))
+(~a (zipper-focus z1))             ; "x "  with its trailing space -- the cursor covers it
+(~a (zipper-focus (to-root z1)))   ; "(aa (p x q) cc)"
 
-(define z2 ((focus "x y ") z1))             ; edits chain through the cursor
-(~a (focus (to-root z2)))   ; "(aa (p x y q) cc)" -- q held its ground
+(define z2 ((zipper-focus "x y ") z1))             ; edits chain through the cursor
+(~a (zipper-focus (to-root z2)))   ; "(aa (p x y q) cc)" -- q held its ground
 ```
 
 ## Domain and open edges
@@ -132,4 +131,4 @@ insert, and the operation is idempotent.
 & "C:\Program Files\Racket\raco.exe" test .\rope-core.rkt .\summaries.rkt .\zipper-core.rkt .\sexp-edit.rkt .\summary-laws.rkt .\helper-algebras.rkt
 ```
 
-1195 tests as of 2026-06-13, the summary-law battery included.
+1239 tests as of 2026-06-16, the summary-law battery included.

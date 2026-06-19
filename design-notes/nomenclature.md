@@ -8,7 +8,7 @@ decision note: when a name is coined or retired, it changes here.
 
 Names come from two streaks, and most terms belong to one:
 
-- **Woodworking / physical** — the rope is stock you shape. You `carve` it, `frame`
+- **Physical** — the rope is material you shape. You `carve` it, `frame`
   a guide in its context, `cover` a region, `sand` a spine smooth. Verbs of
   working a material.
 - **Structural / arithmetic** — the index and its algebra. `multisect`, `flip`,

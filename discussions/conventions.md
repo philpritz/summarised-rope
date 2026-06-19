@@ -156,6 +156,13 @@ Keep notes compact and durable:
   genuinely connected narrative. Distinct decisions scan as a list, not as prose
   that runs them together. This holds even when a short summary is asked for: a
   short note is a *few bullets*, not a dense paragraph.
+- **Draft to the prescribed shape, and flag conflicts.** Before drafting a note,
+  restate its required shape from this file (category line; bulleted; forks with
+  their losing options; parked/draft marked) and draft to that. If the request
+  asks for a conflicting form — "a paragraph," "a short blurb" — surface the
+  conflict and confirm before drafting, rather than silently following the literal
+  form. (A requested form is a premise to verify; see *Verify the user's
+  premises*.)
 - Mark parked ideas explicitly as parked.
 - Mark draft code clearly as draft code.
 - Include small code snippets only when they capture the shape of the design.
