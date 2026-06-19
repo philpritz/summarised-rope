@@ -12,7 +12,7 @@
 ;; into a zipper -- every lifted run lands with the cursor standing where the guides
 ;; point on the new state.  The machine ops:
 ;;
-;;   ascend    rise (pop+apply crumbs) until the focus contains the whole segment
+;;   ascend    rise to a fixpoint -- pop+apply crumbs until the focus contains the segment
 ;;   descend   strip whole sub-ropes (balance halve + guide reads) to the minimal node
 ;;   carve     cut the focus EXACTLY at the boundaries (`multisect`), middle -> focus
 ;;   navigate  = carve . descend . ascend as ONE op -- the lift's permanent last op
@@ -34,7 +34,8 @@
 ;; guides (sexp, char, ...) live in their own files.
 
 (require racket/match
-         "rope-core.rkt")       ; make-summary make-rope multisect frame rope?
+         "rope-core.rkt"            ; make-summary make-rope multisect frame rope?
+         "helper-algebras.rkt")     ; fixed arg
 
 ;; The contracted surface.  The vocabulary and the two accessor contracts are
 ;; defined below, after the zipper struct, since they mention zipper?.  chain is a
@@ -65,20 +66,25 @@
           (lambda (h*) (head b ((make-rope smr) ls (head-rope h*) rs) a))))
 
 ;; ---------- machine ----------
-(define (rise h k) (values ((car k) h) (cdr k)))        ; one step: pop a crumb, apply it
+;; rise: climb one level -- pop a crumb, rebuild the parent focus -- unless the focus
+;; already contains the segment (or the stack is empty), where it stays put.  That
+;; no-op is ascend's fixpoint halt.  contains? -- does the focus bracket the whole
+;; segment? (start watches the left edge, end the right) -- is rise's private test.
+(define (rise smr guides)
+  (define (contains? h)
+    (match-let* ([(head b t a)   h]
+                 [(vector gs ge) guides])
+      (and (not (negative? (gs b (smr t a))))      ; start not left of the focus's left edge
+           (not (positive? (ge (smr b t) a))))))   ; end not right of the focus's right edge
+  (lambda (h k)
+    (if (or (null? k) (contains? h))
+        (values h k)
+        (values ((car k) h) (cdr k)))))
 
-;; contains?: does the focus bracket the whole segment?  start watches the left edge, end the right.
-(define ((contains? smr guides) h)
-  (match-let* ([(head b t a)   h]
-               [(vector gs ge) guides])
-    (and (not (negative? (gs b (smr t a))))      ; start not left of the focus's left edge
-         (not (positive? (ge (smr b t) a))))))   ; end not right of the focus's right edge
-
-;; ascend: rise until the focus contains the segment (recursive step: rise then ascend).
-(define ((ascend smr guides) h k)
-  (if (or (null? k) ((contains? smr guides) h))
-      (values h k)
-      ((compose (ascend smr guides) rise) h k)))
+;; ascend: rise to a fixpoint -- climb until the focus contains the segment (or the
+;; stack empties); the same shape as descend.  (arg 0) keys the fixpoint on the head.
+(define (ascend smr guides)
+  (fixed (rise smr guides) eq? (arg 0)))
 
 ;; toward: one descent step.  Halve the focus; an empty half (either side) means the
 ;; focus is atomic -- nothing to strip, carve does within-atom -- so halt.  Else frame
@@ -101,41 +107,44 @@
         (match* ((gs mt t) (gs lt rt) (ge lt rt) (ge t mt))  ; left edge | seam | seam | right edge
           [(-1 _ _ _) (error 'toward "start precedes the focus -- ascend further")]
           [(_ _ _ 1)  (error 'toward "end follows the focus -- ascend further")]
-          ;; PROVISIONAL crossing guard (proper home TBD; twinned in `carve`).
-          ;; start right of the seam AND end left of it -> the cursor is crossed.
-          ;; Cannot fire for a well-ordered cursor: start right of a seam forces
-          ;; end >= start also right of it.  Early/partial -- only when the edges
-          ;; separate at a node seam; a within-leaf cross is caught by `carve`.
-          [(_ 1 -1 _) (error 'toward "crossed cursor -- end precedes start")]
           [(_ 1 _ _)  (into (lambda (_) (values lt rt mt)))] ; whole seg right of seam -> lt | rt | ()
           [(_ _ -1 _) (into (lambda (_) (values mt lt rt)))] ; whole seg left  of seam -> () | lt | rt
           [(_ _ _ _)  (values h k)]))))                      ; straddle / gap / boundary -> halt
 
-;; descend: iterate toward to a fixpoint (halt = head returned unchanged).
-(define ((descend smr guides) h k)
-  (let loop ([h h] [k k])
-    (let-values ([(h* k*) ((toward smr guides) h k)])
-      (if (eq? h* h) (values h k) (loop h* k*)))))
+;; descend: iterate toward to a fixpoint -- settle when the head (the first value)
+;; stops changing.  toward returns the SAME head on halt and a fresh one on every
+;; step, so `eq?` on the head is exactly the fixpoint test.
+(define (descend smr guides)
+  (fixed (toward smr guides) eq? (arg 0)))
 
 ;; carve: cut the focus at the 2 boundaries via multisect (guides framed by the head's
 ;; context), middle piece -> focus (empty = gap).
 (define ((carve smr guides) h k)
-  (match-define (head b t a) h)
+  (match-define (head b _ a) h)
   (match-define (vector gs ge) (vector-map (frame smr b a) guides))
-  ;; PROVISIONAL crossing guard (proper home TBD; twinned in `toward`).  Cut the
-  ;; focus at the start boundary and read the end guide there: -1 means the end
-  ;; precedes the start (a crossed cursor).  0 (a gap) and +1 (a seg) are fine.
-  ;; This is the catch-all -- it sees the exact char cut, so it also rejects a
-  ;; cross within a single leaf, which `toward`'s seam test cannot.
-  (let-values ([(ls rest) ((multisect (vector gs)) t)])
-    (when (negative? (ge ls rest))
-      (error 'carve "crossed cursor -- end precedes start")))
   (let-values ([(h* c) ((lens smr) (multisect (vector gs ge)) h)])
     (values h* (cons c k))))
 
-;; navigate: the navigation pipeline as ONE op -- ascend, then descend, then carve.
+;; uncrossed: the crossing guard, one pipeline stage -- pass the run through, but
+;; error if the cursor is inverted (end boundary left of start).  Cut the focus at
+;; the start boundary and read the end guide there: negative means the end precedes
+;; the start.  Placed after `ascend` (the focus then brackets both edges), so the
+;; exact char cut is visible -- it catches a within-leaf cross too.
+(define ((uncrossed smr guides) h k)
+  (match-define (head b t a) h)
+  (match-define (vector gs ge) (vector-map (frame smr b a) guides))
+  (let-values ([(ls rs) ((multisect (vector gs)) t)])
+    (when (negative? (ge ls rs))
+      (error 'navigate "crossed cursor -- end precedes start")))
+  (values h k))
+
+;; navigate: the navigation pipeline as ONE op -- ascend to the containing node,
+;; reject a crossed cursor, descend to the minimal node, carve the exact cut.
 (define (navigate smr guides)
-  (compose (carve smr guides) (descend smr guides) (ascend smr guides)))
+  (compose (carve smr guides)
+           (descend smr guides)
+           (uncrossed smr guides)
+           (ascend smr guides)))
 
 ;; ---------- public zipper ----------
 ;; prop:custom-write: a zipper prints as its document with the cursor marked
@@ -330,9 +339,8 @@
   (let ([z ((zipper-guide (gap 6)) (start cc ((make-rope cc) "ab\ncd\nef") (gap 0)))])
     (check-equal? (~a z) "ab\ncd\n‸ef"))                      ; marks sit at the cut, multi-line
 
-  ;; --- PROVISIONAL crossing guard: a cursor whose end precedes its start is
-  ;; rejected at navigation.  Lives in BOTH `carve` and `toward` for now; the
-  ;; single proper home is still to be settled.
+  ;; --- crossing guard: a cursor whose end precedes its start is rejected at
+  ;; navigation by the `uncrossed` stage (after `ascend`, before `descend`).
   (check-exn #rx"crossed cursor" (lambda () ((zipper-guide (seg 5 2)) z0)))   ; start past end
   (check-not-exn (lambda () ((zipper-guide (gap 5)) z0)))     ; a gap (start = end) is not crossed
   (check-not-exn (lambda () ((zipper-guide (seg 2 5)) z0))))  ; an ordered seg is not crossed

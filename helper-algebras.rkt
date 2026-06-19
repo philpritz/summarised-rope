@@ -1,9 +1,16 @@
 #lang racket
 
-;; Small algebraic helpers.  An ISO is a focused pair (to, from): applying it runs
-;; the focused side, `inverse` toggles the focus, and `expt-iso` raises it to an
-;; integer power WITHOUT leaving the type -- the result is still an iso, so it can
-;; be inverted or re-exponentiated in turn.
+;; Small algebraic helpers, each self-contained and documented at its definition:
+;;   iso           a focused (to, from) pair -- a reversible function (detailed below)
+;;   on            (on op f) a b ... = (op (f a) (f b) ...)
+;;   arg           ((arg i ...) . xs): project args by 0-based position (the K combinator)
+;;   fixed         iterate an `improve` step to a fixed point
+;;   lexicographic lift an element comparison to a 3-way order on sequences
+;;
+;; The iso is the one with structure worth spelling out here.  An ISO is a focused
+;; pair (to, from): applying it runs the focused side, `inverse` toggles the focus,
+;; and `expt-iso` raises it to an integer power WITHOUT leaving the type -- the
+;; result is still an iso, so it can be inverted or re-exponentiated in turn.
 ;;
 ;; The point of closure: isos compose as a group (the identity iso the unit,
 ;; `inverse` the inverse), so `expt-iso` gets the whole of Z for free -- negatives are the
@@ -19,7 +26,8 @@
          iso-law?                ; (iso-law? i x): does x round-trip through i?
          check-iso-laws          ; (check-iso-laws i xs): the inputs that don't
          on                      ; (on op f): op on its args, each projected through f
-         fixed                   ; (fixed improve [good-enough?]): iterate to a fixed point
+         arg                     ; ((arg i ...) . xs): selected args as values (0-based projection / K)
+         fixed                   ; (fixed improve [same? equal?] [key list]): iterate to a fixed point
          lexicographic)          ; ((lexicographic cmp) l1 l2): first-difference 3-way order
 
 ;; an iso is a focused pair; `prop:procedure` runs the focused (forward) side, so
@@ -53,20 +61,31 @@
 ;; summary -- e.g. wrapping a guide for a bundle: (on guide smr).
 (define ((on op f) . args) (apply op (map f args)))
 
+;; `arg`: project arguments by 0-based position -- ((arg i j ...) . xs) returns the
+;; i-th, j-th, ... arguments as multiple values.  The generalized projection (the K
+;; combinator): (arg 0) selects the first argument -- Haskell's `const` for two args.
+;; One pass: vectorize xs only up to the furthest index, then emit in `is` order.
+(define ((arg . is) . xs)
+  (let ([v (list->vector (take xs (add1 (apply max is))))])
+    (apply values (map (lambda (i) (vector-ref v i)) is))))
+
 ;; `fixed`: iterate `improve` from a seed to a fixed point, returning the seeker.
 ;; The seed and `improve` may carry MULTIPLE values: `(compose list improve)`
 ;; threads improve's returned values straight back as the next call's arguments,
 ;; so a values-in / values-out `improve` loops with no extra plumbing.  Each step's
 ;; tuple is held as a list, the converged tuple returned as multiple values.
-;; `good-enough?` compares the previous tuple against the next -- default `equal?`,
-;; a true fixed point (improve changed nothing); compose it from a value predicate
-;; with `on` (e.g. `(on = (lambda (t) (apply + t)))` to stop when a derived total
-;; settles).  A step that no-ops when it can make no progress is the natural halt,
-;; so such an `improve` needs no separate stop test.
-(define ((fixed improve [good-enough? equal?]) . xs)
+;; The halt test is an equality over a projection, mirroring `remove-duplicates`'s
+;; `[same? equal?] #:key` (here both positional): stop when the projected state
+;; stops changing.  `key` is applied to the value-tuple AS ARGUMENTS (not a list) --
+;; default `list` rebuilds the tuple, giving whole-tuple `equal?`, a true fixed
+;; point; pick a selector (`(lambda (h k) h)`) or a derived quantity to settle on
+;; that instead, with an equality (`eq?`, `=`) suited to the projected value.  A step
+;; that no-ops when it can make no progress is the natural halt, so such an `improve`
+;; needs no separate stop test.
+(define ((fixed improve [same? equal?] [key list]) . xs)
   (let loop ([xs xs])
     (define ys (apply (compose list improve) xs))   ; improve's values, listed
-    (if (good-enough? xs ys) (apply values ys) (loop ys))))
+    (if (same? (apply key xs) (apply key ys)) (apply values ys) (loop ys))))
 
 ;; `lexicographic`: lift an element comparison to a 3-way order on sequences.
 ;; Walk two lists in parallel; the first non-zero elementwise verdict (`cmp` ->
@@ -121,10 +140,10 @@
   (check-equal? ((on + abs) -1 2 -3) 6)            ; n-ary, not just binary
   (check-equal? ((on cons add1) 1 2) '(2 . 3))
 
-  ;; --- fixed: single value, multiple values, and an `on`-composed good-enough? ---
+  ;; --- fixed: single value, multiple values, and a key projection ---
   (check-equal? ((fixed (lambda (n) (quotient n 2))) 100) 0)        ; halve to the fixpoint 0
   (check-equal? (call-with-values                                   ; multi-value: (a b) -> (b min)
                  (lambda () ((fixed (lambda (a b) (values b (min a b)))) 5 3)) list)
                 '(3 3))
-  ;; stop when a derived quantity settles -- here the tens digit -- via on:
-  (check-equal? ((fixed sub1 (on = (lambda (t) (quotient (car t) 10)))) 25) 24))
+  ;; stop when a derived quantity settles -- here the tens digit -- via key:
+  (check-equal? ((fixed sub1 = (lambda (n) (quotient n 10))) 25) 24))

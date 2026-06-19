@@ -1,11 +1,17 @@
 #lang racket
 
 ;; Summaries: the general summary combinators plus the concrete summary algebras.
-;; The general piece is `bundle` (a product of summaries -- see below); the rest of
+;; The general piece is `bundle` (a product of summaries -- see below), then a group
+;; of plain-text metrics -- `char-smr` (the offset axis), the `count-where` family,
+;; `word-smr` (seam-aware word count), and `linecol-smr` (line/column).  The bulk of
 ;; the file is the sexp instance: its monoid (`sexp-smr`) AND the navigation read
 ;; interface `sand-spines`, which reads a cut as the front/back spines the sexp
-;; layer compares against (sexp-edit.rkt).  The summary *protocol* (make-summary and
-;; the gen:summary-part extension point) lives in rope-core; this file builds on it.
+;; layer compares against (sexp-edit.rkt).  Two highlighting seeds follow it: a naive
+;; `str-smr` (a quote count) and `strsexp-smr`, which reuses the sexp algebra gated by
+;; string state so parens inside strings are discounted, producing index spines like
+;; `sand-spines` does.  Last, `buffer-smr` bundles `sexp-smr` with the three metrics
+;; into one editor-buffer product.  The summary *protocol* (make-summary and the gen:summary-part
+;; extension point) lives in rope-core; this file builds on it.
 ;;
 ;; Sexp summary: the opens/closes frontier algebra as a SIGNED struct, for the current
 ;; rope-core (`make-summary`).  Two storage decisions distinguish it from the 7-list
@@ -40,8 +46,20 @@
 
 (provide bundle                    ; (bundle s1 s2 ...) -> the product smr
          (struct-out bundle-val)   ; the product summary value
+         char-smr count-where      ; plain-text metrics: char offset; chars matching a predicate
+         word-smr (struct-out wc)  ; word count (seam-aware); wc-n reads the count
+         linecol-smr (struct-out linecol)   ; line/column at a cut: linecol-lines / linecol-cols
+         buffer-smr                ; the editor-buffer bundle: sexp navigation + the metrics above
          sexp-smr                  ; the smr  -- (sexp-smr str), ((make-rope sexp-smr) ...)
-         sand-spines)              ; (sand-spines L R) -> (values front back): read a cut as spines
+         sand-spines               ; (sand-spines L R) -> (values front back): read a cut as spines
+         paired-sexp-smr           ; SEPARATE kind-matching multi-bracket summary (sexp-smr stays ( )-only)
+         paired-sand-spines        ; (paired-sand-spines L R) -> spines off a paired frontier
+         front-kinds back-kinds    ; bracket glyph per spine level (openers / closers)
+         same-kind? kind           ; bracket-kind predicate + family
+         str-smr                   ; (str-smr str) -> quote count: the naive in-string seed
+         strsexp-smr               ; sexp algebra gated by string state (parens in strings discounted)
+         strsexp-spines            ; (strsexp-spines L R) -> spines, gated by the left's string parity
+         strsexp-in-string?)       ; (strsexp-in-string? L) -> in a string at the cut after L?
 
 ;; ---------- bundle: a product of summaries ----------
 ;; (bundle s1 s2 ...) -> the product smr; build & stamp ropes under it.  Its value
@@ -61,6 +79,56 @@
   (make-summary
    (lambda (str) (bundle-val (for/hasheq ([c (in-list components)]) (values c (c str)))))
    (lambda (a b)  (bundle-val (for/hasheq ([c (in-list components)]) (values c (c a b)))))))
+
+;; ---------- plain-text metrics ----------
+;; General (non-sexp) summaries, each a monoid over a text measure, read at a cut
+;; off the all-left summary.  Two shapes recur (the law battery in summary-laws.rkt
+;; checks both):
+;;   pointwise   (make-summary measure +) -- the measure already distributes over
+;;               ++, so the homomorphism is free (char-smr, count-where).
+;;   seam-aware  a word can straddle a chunk boundary, so the value carries edge
+;;               state and the combine reconciles the seam, like `sexp+` (word-smr;
+;;               #f is the identity, short-circuited in the combine).
+
+;; char count -- the offset axis.  string-length is O(1), so the measure is direct
+;; (not (count-where (lambda (_) #t)), which would scan every char).
+(define char-smr (make-summary string-length +))
+
+;; count-where: chars satisfying `pred`.  A family -- str-smr is its quote instance
+;; ((count-where (lambda (c) (char=? c #\"))); whitespace, digits, a search char are
+;; others.  Pointwise: combine = +, identity (the empty count) = 0.
+(define (count-where pred)
+  (make-summary (lambda (s) (for/sum ([c (in-string s)] #:when (pred c)) 1)) +))
+
+;; word count -- words are maximal non-whitespace runs.  Seam-aware: a word split
+;; across the cut ("hel" ++ "lo") is ONE word, so the combine drops the straddler.
+;; The value records whether each EDGE char is a word char; #f is the identity.
+(struct wc (head n tail) #:transparent)        ; head/tail: is the edge char non-whitespace?
+(define (word-leaf s)
+  (and (positive? (string-length s))
+       (wc (not (char-whitespace? (string-ref s 0)))
+           (length (regexp-match* #px"\\S+" s))
+           (not (char-whitespace? (string-ref s (sub1 (string-length s))))))))
+(define (word+ x y)
+  (or (and x y
+           (match-let ([(wc xh xn xt) x] [(wc yh yn yt) y])
+             (wc xh (- (+ xn yn) (if (and xt yh) 1 0)) yt)))  ; both word chars at the seam -> one word, not two
+      x y))
+(define word-smr (make-summary word-leaf word+))
+
+;; line/column -- newline count plus the chars since the last newline.  Read at a
+;; cut off the all-left summary: line (0-based) = `linecol-lines`, column (0-based)
+;; = `linecol-cols` (add 1 each for editor display).  (linecol 0 0) is the identity,
+;; so no #f sentinel; the combine keeps the left's trailing column only while the
+;; right operand has no newline of its own.
+(struct linecol (lines cols) #:transparent)
+(define (linecol-leaf s)
+  (linecol (for/sum ([c (in-string s)] #:when (char=? c #\newline)) 1)
+           (string-length (last (regexp-split #rx"\n" s)))))   ; chars after the last \n
+(define (linecol+ x y)
+  (match-let ([(linecol la ca) x] [(linecol lb cb) y])
+    (linecol (+ la lb) (if (zero? lb) (+ ca cb) cb))))
+(define linecol-smr (make-summary linecol-leaf linecol+))
 
 ;; ---------- the summary value ----------
 ;; #f stays the empty/identity (= (sexp-smr "")).  head/tail flank the three
@@ -212,6 +280,168 @@
     [(mid)       (values (cons (- fh 1/2) fr) (cons (+ bh 1/2) br))]
     [(lean)      (values (cons (- fh 1/2) fr) (cons (- bh 1/2) br))]))
 
+;; ---------- paired: kind-matching multi-bracket sexp summary ----------
+;; A SEPARATE summary from `sexp-smr` (which stays bracket-blind, ( ) only).  Paired
+;; recognizes ( ) [ ] { }, tags each level with its bracket kind, and matches a closer
+;; to the innermost open OF ITS KIND (the HTML-style "pop to the matching bracket",
+;; 2b), skipping wrong-kind opens.  Its frontier entries are (kind . count) pairs (the
+;; bracket glyph + the signed slot), so it carries its OWN leaf / merge / bump / spine
+;; reads -- it shares only the `frontier` struct, the #f-safe readers, and `cut-kind`.
+;; On WELL-FORMED input each closer's match is innermost, so paired's structure equals
+;; a bracket-aware nesting parse; the skip fires only on malformed input, where the
+;; offset accounting is not yet guaranteed associative (skipped opens are dropped).
+(define (opener? c) (memv c '(#\( #\[ #\{)))
+(define (closer? c) (memv c '(#\) #\] #\})))
+(define (kind c) (case c [(#\( #\)) 'round] [(#\[ #\]) 'square] [(#\{ #\}) 'curly] [else #f]))
+(define (same-kind? a b) (eq? (kind a) (kind b)))            ; do two brackets pair?
+(define (bracket-class c)                                    ; head/tail class, brackets included
+  (cond [(opener? c) 'open] [(closer? c) 'close] [(char-whitespace? c) 'ws] [else 'atom]))
+
+(define (paired-tokens s)                                    ; brackets and atom runs, in order
+  (for/list ([t (in-list (regexp-match* #px"[][(){}]|[^][(){}\\s]+" s))])
+    (define c (string-ref t 0))
+    (if (eq? (bracket-class c) 'atom) 'atom c)))             ; -> a bracket char | 'atom
+
+(define (paired-bump forms opens)                            ; bump the innermost open's count
+  (if (null? opens)
+      (values (add1 forms) opens)
+      (match-let ([(cons k n) (car opens)]) (values forms (cons (cons k (add1 n)) (cdr opens))))))
+(define (paired-add-inner opens n)
+  (match-let ([(cons k m) (car opens)]) (cons (cons k (+ m n)) (cdr opens))))
+
+(define (skip-match opens k)        ; pop wrong-kind opens; -> the stack just past the kind match
+  (cond [(null? opens) opens]
+        [(same-kind? (caar opens) k) (cdr opens)]
+        [else (skip-match (cdr opens) k)]))
+(define (has-kind? opens k) (for/or ([e (in-list opens)]) (same-kind? (car e) k)))
+
+(define (paired-leaf s)
+  (and (positive? (string-length s))
+       (let-values
+           ([(closes forms opens)
+             (for/fold ([closes '()] [forms 0] [opens '()])
+                       ([tok (in-list (paired-tokens s))])
+               (cond
+                 [(eq? tok 'atom)       (let-values ([(f o) (paired-bump forms opens)]) (values closes f o))]
+                 [(opener? tok)         (values closes forms (cons (cons tok 1) opens))]
+                 [(has-kind? opens tok) (let-values ([(f o) (paired-bump forms (skip-match opens tok))])  ; close its kind
+                                          (values closes f o))]
+                 [else                  (values (cons (cons tok (- (add1 forms))) closes) 1 opens)]))])    ; dangling
+         (frontier (bracket-class (string-ref s 0))
+                   (reverse closes) forms opens
+                   (bracket-class (string-ref s (sub1 (string-length s))))))))
+
+(define (paired-drop y)             ; the mid-atom continuation, on (kind . count) closes
+  (match y
+    [(frontier _ (cons (cons k cv) rest) _ _ _)
+     (struct-copy frontier y [closes (cons (cons k (add1 cv)) rest)])]
+    [_ (struct-copy frontier y [forms (sub1 (frontier-forms y))])]))
+
+(define (merge-paired forms opens closes right-forms right-opens)
+  (let loop ([forms forms] [stack opens] [closes closes] [out '()])
+    (match closes
+      ['()
+       (if (null? stack)
+           (values (reverse out) (+ forms right-forms) right-opens)
+           (let ([stack (if (zero? right-forms) stack (paired-add-inner stack right-forms))])
+             (values (reverse out) forms (append right-opens stack))))]
+      [(cons (cons k cv) rest)
+       (if (has-kind? stack k)
+           (loop forms (skip-match stack k) rest out)                  ; matching opener -> cancel (drop orphans)
+           (loop 0 stack rest (cons (cons k (- cv forms)) out)))])))   ; no match -> dangling
+
+(define (paired+ x y)
+  (or (and x y
+           (let ([y (if (and (eq? (frontier-tail x) 'atom) (eq? (frontier-head y) 'atom))
+                        (paired-drop y) y)])
+             (match-let ([(frontier xh xc xf xo _) x] [(frontier _ yc yf yo yt) y])
+               (define-values (closes forms opens) (merge-paired xf xo yc yf yo))
+               (frontier xh (append xc closes) forms opens yt))))
+      x y))
+(define paired-sexp-smr (make-summary paired-leaf paired+))
+
+;; paired's spine reads (entries are (kind . count); slot = cdr, glyph = car).  cut-kind
+;; is shared -- it reads only the head/tail classes, which `bracket-class` supplies.
+(define (paired-sand-spines L R)
+  (match-define (cons fh fr) (append (map (lambda (e) (sub1 (cdr e))) (sexp-opens L)) (list (sexp-forms L))))
+  (match-define (cons bh br) (append (map cdr (sexp-closes R)) (list (- (add1 (sexp-forms R))))))
+  (case (cut-kind L R)
+    [(start end) (values (cons fh fr)        (cons bh br))]
+    [(mid)       (values (cons (- fh 1/2) fr) (cons (+ bh 1/2) br))]
+    [(lean)      (values (cons (- fh 1/2) fr) (cons (- bh 1/2) br))]))
+(define (front-kinds L) (map car (sexp-opens L)))   ; open brackets, innermost-first
+(define (back-kinds  R) (map car (sexp-closes R)))  ; close brackets, innermost-first
+
+;; ---------- string summary (naive) ----------
+;; The seed of syntax highlighting in the summary: in-string state as a raw quote
+;; count.  The value is the number of " in a fragment; at a cut, (str-smr L) is the
+;; quote count to the left, and the in/out-of-string reading (a separate step) is its
+;; parity.  Naive on purpose -- it counts EVERY ", so escapes (\"), quotes inside
+;; comments, #\" char literals, and |...| symbols are not yet discounted.
+(define (str-leaf s)
+  (for/sum ([c (in-string s)] #:when (char=? c #\")) 1))
+(define str-smr (make-summary str-leaf +))   ; combine = +, identity (str-leaf "") = 0
+
+;; ---------- string + sexp summary (gated) ----------
+;; Reuses the sexp algebra, gated by string state: a " toggles in/out of a string,
+;; and sexp tokens (parens AND atoms) inside a string are inert -- the whole string
+;; collapses to ONE form, an atom with an opaque interior.  Since a fragment cannot
+;; know whether it BEGINS inside a string (that depends on everything to its left),
+;; the value carries the sexp frontier parsed under each entry mode -- entered in
+;; code, and entered mid-string -- plus the quote count (its parity is the gate).
+;; The combine reuses `sexp+`; the only new logic is selecting which of the right
+;; operand's two frontiers to splice, by the left's parity.
+;;
+;; Each frontier is built by transforming the text to its code-equivalent: every
+;; string becomes a single delimited placeholder atom ("~") with its interior
+;; removed, so the existing tokenizer / fold / sand-spines treat the string exactly
+;; like an atom -- one form, a spine slot, a ½-leaned interior.
+(struct cs (quotes code string) #:transparent)   ; count + frontier-if-code + frontier-if-string
+
+(define (transform s start-in-string?)            ; -> code-equivalent text (strings -> "~")
+  (define out (open-output-string))
+  (let loop ([chs (string->list s)] [in? start-in-string?])
+    (cond
+      [(null? chs) (get-output-string out)]
+      [(char=? (car chs) #\")                     ; a quote toggles the mode
+       (if in? (write-char #\space out) (write-string " ~" out))   ; close -> delimiter; open -> +placeholder
+       (loop (cdr chs) (not in?))]
+      [in?  (loop (cdr chs) in?)]                 ; string interior: drop it
+      [else (write-char (car chs) out)            ; code char: keep
+            (loop (cdr chs) in?)])))
+
+(define (strsexp-leaf s)
+  (cs (for/sum ([c (in-string s)] #:when (char=? c #\")) 1)
+      (sexp-leaf (transform s #f))                ; frontier if entered in code
+      (sexp-leaf (transform s #t))))              ; frontier if entered in a string
+
+(define (strsexp+ a b)
+  (match-define (cs qa ca sa) a)
+  (match-define (cs qb cb sb) b)
+  (define flip? (odd? qa))                         ; mode at the seam = entry XOR parity(a)
+  (cs (+ qa qb)
+      (sexp+ ca (if flip? sb cb))                  ; whole entered in code
+      (sexp+ sa (if flip? cb sb))))                ; whole entered in a string
+
+(define strsexp-smr (make-summary strsexp-leaf strsexp+))
+
+;; reads at a cut: in-string is the left's quote parity; the spines reuse sand-spines
+;; on L's code frontier and R's parity-selected frontier (R's entry mode = L's parity).
+(define (strsexp-in-string? L) (odd? (cs-quotes L)))
+(define (strsexp-spines L R)
+  (sand-spines (cs-code L)
+               (if (odd? (cs-quotes L)) (cs-string R) (cs-code R))))
+
+;; ---------- the buffer bundle ----------
+;; The editor-buffer summary: sexp navigation AND the plain-text metrics in one
+;; product, so a single rope built under `buffer-smr` caches everything the cursor
+;; and a status line need.  Navigation reads the sexp slot exactly as before --
+;; (on sand-spines sexp-smr) -- while (char-smr v) / (word-smr v) / (linecol-smr v)
+;; select the metric slots off the same value.  Components are keyed by smr
+;; IDENTITY (eq?), so read each slot through THESE provided bindings, never a fresh
+;; (make-summary ...) -- a different object is a different key and misses the slot.
+(define buffer-smr (bundle sexp-smr char-smr word-smr linecol-smr))
+
 ;; ============================================================================
 (module+ test
   (require rackunit)
@@ -266,6 +496,24 @@
          [k (in-range 1 6)])
     (check-equal? (chunked str k) (sexp-smr str)
                   (format "chunk size ~a of ~s" k str)))
+
+  ;; --- paired-sexp-smr: a SEPARATE bracket-aware summary; ( [ { matched by kind.
+  ;;     `sexp-smr` above stays bracket-blind ([] {} are atoms) -- brackets live here. ---
+  (check-true  (same-kind? #\( #\)))  (check-false (same-kind? #\( #\]))
+  (define (popens x) (map cdr (sexp-opens (paired-sexp-smr x))))   ; counts off paired (kind . n) entries
+  (check-equal? (popens "[")     '(1))                             ; [ opens a level
+  (check-equal? (popens "(a [b") '(2 2))                           ; nested, multi-kind
+  (check-equal? (front-kinds (paired-sexp-smr "(a [b")) (list #\[ #\())   ; bracket per level, innermost-first
+  ;; mismatch: the ] does not close the ( -- the ( stays open and the ] dangles
+  (check-equal? (sexp-opens (paired-sexp-smr "(a]")) (list (cons #\( 2)))
+  ;; associativity over WELL-FORMED multi-kind nesting (paired's safe domain)
+  (define (paired-chunked str k)
+    (apply paired-sexp-smr (for/list ([i (in-range 0 (string-length str) k)])
+                             (substring str i (min (string-length str) (+ i k))))))
+  (for* ([str (list "(a [b c] d)" "(let ([x 1] [y 2]) (+ x y))" "{a [b (c)] d}"
+                    "([{}])" "(f [g {h}])" "()" "(aa (p q) cc)")]
+         [k (in-range 1 6)])
+    (check-equal? (paired-chunked str k) (paired-sexp-smr str) (format "paired chunk ~a of ~s" k str)))
 
   ;; --- the summary-law battery (summary-laws.rkt) on realistic generated sexps ---
   (require "summary-laws.rkt" rackcheck)
@@ -344,4 +592,68 @@
           "q) cc)" "((a b) c"
           "" " " "((((" "))))" "atom"))
 
-  (check-summary-laws sexp-smr gen:sexp-doc #:corpus sexp-corpus))
+  (check-summary-laws sexp-smr gen:sexp-doc #:corpus sexp-corpus)
+
+  ;; --- plain-text metrics: worked values + the law battery ---
+  (check-equal? (char-smr "hello") 5)
+  (check-equal? ((count-where char-whitespace?) "a b  c") 3)
+
+  ;; word count: maximal non-whitespace runs; a word straddling a chunk seam is
+  ;; counted once (the combine drops the double-count)
+  (define (word-count s) (cond [(word-smr s) => wc-n] [else 0]))
+  (check-equal? (word-count "the quick brown fox") 4)
+  (check-equal? (word-count "  ") 0)
+  (check-equal? (word-count "")  0)
+  (check-equal? (word-smr "hel" "lo") (word-smr "hello"))   ; one word across the seam
+  (check-equal? (word-smr "a b" " c")  (word-smr "a b c"))
+
+  ;; line/column off the all-left summary, both 0-based
+  (define (line/col s i)
+    (let ([v (linecol-smr (substring s 0 i))]) (cons (linecol-lines v) (linecol-cols v))))
+  (check-equal? (line/col "ab\ncd\nef" 0) '(0 . 0))
+  (check-equal? (line/col "ab\ncd\nef" 4) '(1 . 1))    ; line 1, just before the 'd'
+  (check-equal? (line/col "ab\ncd\nef" 6) '(2 . 0))
+  (check-equal? (linecol-smr "ab\nc" "d\nef") (linecol-smr "ab\ncd\nef"))  ; trailing col carries the seam
+
+  ;; the battery on each, over text with spaces, newlines, and parens
+  (define gen:text (gen:string (gen:one-of (string->list "ab  \n()")) #:max-length 16))
+  (define metric-corpus (list "" " " "a" "ab cd" "a\nb\n" "\n\n" "  ab  " "x\ny z\nw"))
+  (check-summary-laws char-smr    gen:text #:corpus metric-corpus)
+  (check-summary-laws word-smr    gen:text #:corpus metric-corpus)
+  (check-summary-laws linecol-smr gen:text #:corpus metric-corpus)
+
+  ;; --- the buffer bundle: one value, every slot selected by its component smr ---
+  (let ([v (buffer-smr "(define x\ny)")])
+    (check-equal? (char-smr v) 12)                          ; char slot
+    (check-equal? (wc-n (word-smr v)) 3)                    ; word slot: (define / x / y)
+    (check-equal? (linecol-lines (linecol-smr v)) 1)        ; line/col slot
+    (check-equal? (linecol-cols  (linecol-smr v)) 2)
+    (check-equal? (sexp-smr v) (sexp-smr "(define x\ny)"))) ; sexp slot (what navigation reads)
+
+  ;; --- the buffer bundle on a ROPE: a component smr reads its slot straight off it ---
+  ;; (coerce's rope arm: (char-smr r) = (char-smr (rope-summary r)) = the char slot)
+  (let ([r ((make-rope buffer-smr) "(define x\ny)")])
+    (check-equal? (char-smr r) 12)                          ; char slot off the bundle rope
+    (check-equal? (wc-n (word-smr r)) 3)                    ; word slot
+    (check-equal? (sexp-smr r) (sexp-smr "(define x\ny)"))) ; sexp slot
+
+  ;; --- gated string + sexp summary: sexp tokens inside strings are inert ---
+  (define (sx str) (strsexp-smr str))
+  ;; the inner "(" does not open a level -- the string is one form, like an atom `~`
+  (check-equal? (cs-code (sx "(a \"(\" b")) (sexp-smr "(a ~ b"))
+  (check-equal? (cs-code (sx "(\"((((\")")) (sexp-smr "(~)"))   ; depth back to 0 after a parens-full string
+  ;; in-string at a cut = quote parity to the left
+  (check-true  (strsexp-in-string? (sx "(a \"")))
+  (check-false (strsexp-in-string? (sx "(a \"x\" ")))
+  ;; spines: the string occupies its own child slot (a=child 0, string=child 1, b=child 2)
+  (check-equal? (let-values ([(f b) (strsexp-spines (sx "(a \"x\" ") (sx "b)"))]) f) '(2 0))
+  ;; associativity: chunked == whole, over strings full of parens (and plain sexps too)
+  (define (sx-chunked str k)
+    (apply strsexp-smr (for/list ([i (in-range 0 (string-length str) k)])
+                         (substring str i (min (string-length str) (+ i k))))))
+  (for* ([str (list "(a \"(\" b)" "\"(\"" "(\"))((\")" "x \"y z\" w"
+                    "(define s \"hi (there)\")" "tail \" mid ( \" end"
+                    "()" "(aa (p q) cc)" "\"unclosed (")]
+         [k (in-range 1 6)])
+    (check-equal? (sx-chunked str k) (strsexp-smr str)
+                  (format "strsexp chunk ~a of ~s" k str))))
