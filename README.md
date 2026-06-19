@@ -131,4 +131,4 @@ insert, and the operation is idempotent.
 & "C:\Program Files\Racket\raco.exe" test .\rope-core.rkt .\summaries.rkt .\zipper-core.rkt .\sexp-edit.rkt .\summary-laws.rkt .\helper-algebras.rkt
 ```
 
-1239 tests as of 2026-06-16, the summary-law battery included.
+1484 tests as of 2026-06-19, the summary-law battery included.
