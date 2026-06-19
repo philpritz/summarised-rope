@@ -21,7 +21,6 @@
 ;; a bare function.
 
 (provide (struct-out iso)        ; (iso to from); callable = applies `to`
-         inverse                 ; the focus toggle; an involution
          compose-iso             ; compose any number of isos; inverses reversed: (g.f)-1 = f-1.g-1
          expt-iso                ; iso x Z -> iso, closed on isos
          iso-law?                ; (iso-law? i x): does x round-trip through i?
