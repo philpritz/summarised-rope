@@ -88,8 +88,8 @@
 
   ;; split: rope prebuilt in gen (UNTIMED); time only the midpoint cut -- O(log N).
   (define (halve L R) (cond [(< L R) 1] [(> L R) -1] [else 0]))
-  (table "split: ((multisect (vector halve)) rope)           -- expect ~flat (log)"
-         (bench (lambda (r) ((multisect (vector halve)) r))
+  (table "split: ((multisect sum (vector halve)) rope)       -- expect ~flat (log)"
+         (bench (lambda (r) ((multisect sum (vector halve)) r))
                 (lambda (n) ((make-rope sum) (make-string n #\x)))
                 sizes #:reps 50))
 

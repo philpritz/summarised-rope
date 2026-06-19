@@ -10,12 +10,13 @@
 ;; and (zipper-lift op ...) hands each op the zipper's own smr and guides, composes them
 ;; (rightmost runs first, like compose), NAVIGATES with those guides, and reseals the run
 ;; into a zipper -- every lifted run lands with the cursor standing where the guides
-;; point on the new state.  The machine ops:
+;; point on the new state.  The machine ops -- navigate and its four local stages:
 ;;
+;;   navigate  carve . descend . uncrossed . ascend as ONE op -- the lift's permanent last op
 ;;   ascend    rise to a fixpoint -- pop+apply crumbs until the focus contains the segment
 ;;   descend   strip whole sub-ropes (balance halve + guide reads) to the minimal node
+;;   uncrossed reject a crossed cursor (end boundary left of start)
 ;;   carve     cut the focus EXACTLY at the boundaries (`multisect`), middle -> focus
-;;   navigate  = carve . descend . ascend as ONE op -- the lift's permanent last op
 ;;
 ;; A guide is a comparator (L R) -> {-1,0,1}: +1 if the target boundary is right of the
 ;; cut, -1 left, 0 at it.  A cursor is a 2-guide vector (start end); a gap is start = end
@@ -35,7 +36,7 @@
 
 (require racket/match
          "rope-core.rkt"            ; make-summary make-rope multisect frame rope?
-         "helper-algebras.rkt")     ; fixed arg
+         "helper-algebras.rkt")     ; fixed arg pass
 
 ;; The contracted surface.  The vocabulary and the two accessor contracts are
 ;; defined below, after the zipper struct, since they mention zipper?.  chain is a
@@ -81,11 +82,6 @@
         (values h k)
         (values ((car k) h) (cdr k)))))
 
-;; ascend: rise to a fixpoint -- climb until the focus contains the segment (or the
-;; stack empties); the same shape as descend.  (arg 0) keys the fixpoint on the head.
-(define (ascend smr guides)
-  (fixed (rise smr guides) eq? (arg 0)))
-
 ;; toward: one descent step.  Halve the focus; an empty half (either side) means the
 ;; focus is atomic -- nothing to strip, carve does within-atom -- so halt.  Else frame
 ;; the guides into within-focus probes and route by the seam reads:
@@ -97,7 +93,7 @@
   (match-let*-values ([((head b t a))   h]
                       [((vector gs ge)) (vector-map (frame smr b a) guides)]  ; framed: read within-focus
                       [(mt)             (empty smr)]
-                      [(lt rt)          ((multisect) t)]                      ; the balance halve
+                      [(lt rt)          ((multisect smr) t)]                  ; the balance halve
                       [(atom?)          (or (equal? lt mt) (equal? rt mt))]   ; an empty half, either side
                       [(into)           (lambda (split)
                                           (let-values ([(h* c) ((lens smr) split h)])
@@ -111,40 +107,27 @@
           [(_ _ -1 _) (into (lambda (_) (values mt lt rt)))] ; whole seg left  of seam -> () | lt | rt
           [(_ _ _ _)  (values h k)]))))                      ; straddle / gap / boundary -> halt
 
-;; descend: iterate toward to a fixpoint -- settle when the head (the first value)
-;; stops changing.  toward returns the SAME head on halt and a fresh one on every
-;; step, so `eq?` on the head is exactly the fixpoint test.
-(define (descend smr guides)
-  (fixed (toward smr guides) eq? (arg 0)))
-
-;; carve: cut the focus at the 2 boundaries via multisect (guides framed by the head's
-;; context), middle piece -> focus (empty = gap).
-(define ((carve smr guides) h k)
-  (match-define (head b _ a) h)
-  (match-define (vector gs ge) (vector-map (frame smr b a) guides))
-  (let-values ([(h* c) ((lens smr) (multisect (vector gs ge)) h)])
-    (values h* (cons c k))))
-
-;; uncrossed: the crossing guard, one pipeline stage -- pass the run through, but
-;; error if the cursor is inverted (end boundary left of start).  Cut the focus at
-;; the start boundary and read the end guide there: negative means the end precedes
-;; the start.  Placed after `ascend` (the focus then brackets both edges), so the
-;; exact char cut is visible -- it catches a within-leaf cross too.
-(define ((uncrossed smr guides) h k)
-  (match-define (head b t a) h)
-  (match-define (vector gs ge) (vector-map (frame smr b a) guides))
-  (let-values ([(ls rs) ((multisect (vector gs)) t)])
-    (when (negative? (ge ls rs))
-      (error 'navigate "crossed cursor -- end precedes start")))
-  (values h k))
-
-;; navigate: the navigation pipeline as ONE op -- ascend to the containing node,
-;; reject a crossed cursor, descend to the minimal node, carve the exact cut.
+;; navigate: the navigation pipeline as ONE op.  ascend to the node containing the
+;; segment, reject a crossed cursor, descend to the minimal node, carve the exact cut.
+;; The four stages are navigate's own locals: ascend/descend are fixpoints of rise/
+;; toward (keyed on the head via (arg 0)); uncrossed/carve frame the head's context
+;; into the guides, then cut the focus.
 (define (navigate smr guides)
-  (compose (carve smr guides)
-           (descend smr guides)
-           (uncrossed smr guides)
-           (ascend smr guides)))
+  (define ascend  (fixed (rise   smr guides) eq? (arg 0)))   ; rise   to a fixpoint
+  (define descend (fixed (toward smr guides) eq? (arg 0)))   ; toward to a fixpoint
+  (define (uncrossed h k)                                    ; reject a crossed cursor
+    (match-define (head b t a) h)
+    (match-define (vector gs ge) (vector-map (frame smr b a) guides))
+    (let-values ([(ls rs) ((multisect smr (vector gs)) t)])
+      (when (negative? (ge ls rs))
+        (error 'navigate "crossed cursor -- end precedes start")))
+    (values h k))
+  (define (carve h k)                                        ; the exact cut
+    (match-define (head b _ a) h)
+    (match-define (vector gs ge) (vector-map (frame smr b a) guides))
+    (let-values ([(h* c) ((lens smr) (multisect smr (vector gs ge)) h)])
+      (values h* (cons c k))))
+  (compose carve descend uncrossed ascend))
 
 ;; ---------- public zipper ----------
 ;; prop:custom-write: a zipper prints as its document with the cursor marked
@@ -176,8 +159,7 @@
 ;; runs first) with `navigate` as the permanent last op, reseal.  Every write
 ;; funnels through the lift, so every write lands with the cursor standing where
 ;; the installed guides point on the new state; (zipper-lift) with no ops is plain
-;; re-navigation.  `pass` is the thrush: ((pass smr gs) op) = (op smr gs).
-(define ((pass . args) f) (apply f args))
+;; re-navigation.  `pass` (helper-algebras) is the thrush: ((pass smr gs) op) = (op smr gs).
 
 (define ((zipper-lift . ops) z)
   (match-define (zipper smr gs h k) z)
@@ -252,7 +234,7 @@
   (define gs   (zipper-guide z))
   (define smr  (zipper-smr z))
   (define root (zipper-focus (to-root z)))
-  (let-values ([(b m a) ((multisect gs) root)])
+  (let-values ([(b m a) ((multisect smr gs) root)])
     (if (equal? m (empty smr))
         (fprintf port "~a‸~a" b a)
         (fprintf port "~a⟦~a⟧~a" b m a))))

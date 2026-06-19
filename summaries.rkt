@@ -585,7 +585,7 @@
           "'(1 2 . 3)"
           "(display \"hello world\")"
           ";; a comment line\n(+ 1 2)"
-          "(define (f λ) (λ))"
+          "(define (f g) (g))"
           "(_ _)" "((a b) c)" "(define (f x) (+ x 1))"
           "(_ _ " "((a " ")" "a b c" "(((x)))" ") foo (bar"
           "()" "(())" "(aa (p q) cc)" "((a b) (c d))" "x (y) z"

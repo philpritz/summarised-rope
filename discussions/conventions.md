@@ -136,7 +136,9 @@ follow different guidelines:
   changes. The diff is the record, so the note is a short **bulleted list** (per
   *Content style*): what landed, the test state, and only the forks that were
   genuinely decided along the way (with their losing options, per *Record the
-  alternatives*). No narration of the work itself.
+  alternatives*). No narration of the work itself. Reference examples:
+  `discussions/2026-06-19/2-claude.md` (rope-core rewrite) and `3-claude.md`
+  (zipper-core pare-down).
 - **Design / exploration sessions** — the work is the thinking: options weighed,
   shapes tried in chat, directions parked or rejected. Little or nothing lands,
   so the note is the only artifact — give the ideas, the alternatives, and the

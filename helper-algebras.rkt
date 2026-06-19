@@ -4,6 +4,7 @@
 ;;   iso           a focused (to, from) pair -- a reversible function (detailed below)
 ;;   on            (on op f) a b ... = (op (f a) (f b) ...)
 ;;   arg           ((arg i ...) . xs): project args by 0-based position (the K combinator)
+;;   pass          ((pass . args) . fs): apply each f to the fixed args, as values (the thrush / fork)
 ;;   fixed         iterate an `improve` step to a fixed point
 ;;   lexicographic lift an element comparison to a 3-way order on sequences
 ;;
@@ -21,12 +22,13 @@
 
 (provide (struct-out iso)        ; (iso to from); callable = applies `to`
          inverse                 ; the focus toggle; an involution
-         iso∘                    ; compose, inverses reversed: (g.f)-1 = f-1.g-1
+         compose-iso             ; compose any number of isos; inverses reversed: (g.f)-1 = f-1.g-1
          expt-iso                ; iso x Z -> iso, closed on isos
          iso-law?                ; (iso-law? i x): does x round-trip through i?
          check-iso-laws          ; (check-iso-laws i xs): the inputs that don't
          on                      ; (on op f): op on its args, each projected through f
          arg                     ; ((arg i ...) . xs): selected args as values (0-based projection / K)
+         pass                    ; ((pass . args) . fs): each f applied to the fixed args, as values (thrush / fork)
          fixed                   ; (fixed improve [same? equal?] [key list]): iterate to a fixed point
          lexicographic)          ; ((lexicographic cmp) l1 l2): first-difference 3-way order
 
@@ -37,19 +39,20 @@
 
 (define (inverse i) (iso (iso-from i) (iso-to i)))
 
-;; compose; the inverse of a composite runs the halves in reverse order
-(define (iso∘ g f)
-  (iso (compose (iso-to g)   (iso-to f))
-       (compose (iso-from f) (iso-from g))))
+;; compose any number of isos; the inverse of a composite runs the halves in
+;; reverse order.  (compose-iso) with no isos is the identity iso.
+(define (compose-iso . is)
+  (iso (apply compose (map iso-to is))
+       (apply compose (map iso-from (reverse is)))))
 
 ;; raise to an integer power, staying an iso; negatives go through the inverse.
 (define (expt-iso i n)
   (cond [(negative? n) (expt-iso (inverse i) (- n))]
-        [else (for/fold ([acc (iso values values)]) ([_ (in-range n)]) (iso∘ i acc))]))
+        [else (for/fold ([acc (iso values values)]) ([_ (in-range n)]) (compose-iso i acc))]))
 
 ;; the iso law (over equal?): i composed with its inverse is the identity --
 ;; running a value through `to` then back through `from` returns it unchanged.
-(define (iso-law? i x) (equal? ((iso∘ (inverse i) i) x) x))
+(define (iso-law? i x) (equal? ((compose-iso (inverse i) i) x) x))
 
 ;; sweep a corpus through the law; the result is the inputs that DON'T round-trip
 ;; ('() means i is a genuine iso over every one of them).
@@ -68,6 +71,15 @@
 (define ((arg . is) . xs)
   (let ([v (list->vector (take xs (add1 (apply max is))))])
     (apply values (map (lambda (i) (vector-ref v i)) is))))
+
+;; `pass`: hold a tuple of arguments, then apply each function to them, returning
+;; the results as multiple values -- ((pass . args) f g ...) = (values (apply f
+;; args) (apply g args) ...).  The thrush ((pass x) f) = (f x), flipped to fix the
+;; argument and await the function, generalized to a FORK over several functions
+;; (Clojure's juxt, as values not a list).  One function gives one value, so it
+;; threads straight through `map`.
+(define ((pass . args) . fs)
+  (apply values (map (lambda (f) (apply f args)) fs)))
 
 ;; `fixed`: iterate `improve` from a seed to a fixed point, returning the seeker.
 ;; The seed and `improve` may carry MULTIPLE values: `(compose list improve)`
@@ -116,6 +128,11 @@
   ;; --- the result is still an iso: invert it, re-exponentiate it ---
   (check-equal? ((inverse (expt-iso inc 3)) 13) 10)
 
+  ;; --- compose-iso is variadic: any number of isos, inverses reversed ---
+  (check-equal? ((compose-iso inc inc inc) 10) 13)          ; three composed, forward
+  (check-equal? ((inverse (compose-iso inc inc inc)) 13) 10)
+  (check-equal? ((compose-iso) 42) 42)                      ; no isos = the identity iso
+
   ;; --- the identities that closure buys ---
   (define i (iso (lambda (x) (* 2 x)) (lambda (x) (/ x 2))))
   ;; inverse and power commute
@@ -139,6 +156,12 @@
   (check-equal? ((on + abs) -3 4) 7)               ; abs each, then +
   (check-equal? ((on + abs) -1 2 -3) 6)            ; n-ary, not just binary
   (check-equal? ((on cons add1) 1 2) '(2 . 3))
+
+  ;; --- pass: the thrush holds the args; several functions fork, as values ---
+  (check-equal? ((pass 5) add1) 6)                 ; one function = the thrush, one value
+  (check-equal? (call-with-values
+                 (lambda () ((pass 3 4) + * -)) list)
+                '(7 12 -1))                         ; each f applied to (3 4), as values
 
   ;; --- fixed: single value, multiple values, and a key projection ---
   (check-equal? ((fixed (lambda (n) (quotient n 2))) 100) 0)        ; halve to the fixpoint 0

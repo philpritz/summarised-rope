@@ -218,7 +218,7 @@
 
   ;; --- navigation + editing, flat ---
   (define (cuts rope ix)                  ; where a single index cuts, as strings
-    (let-values ([(l r) ((multisect (vector (slot-guide ix))) rope)])
+    (let-values ([(l r) ((multisect sexp-smr (vector (slot-guide ix))) rope)])
       (cons (~a l) (~a r))))
   (define (doc z) (~a (zipper-focus (to-root z))))
   (define rope ((make-rope sexp-smr) "(aa bb cc)"))

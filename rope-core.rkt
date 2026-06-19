@@ -8,7 +8,7 @@
 ;;
 ;;   smr        : (string | rope | summary)* -> summary  ; built by `make-summary`
 ;;   make-rope  : smr -> ((string | rope)* -> rope)      ; the rope factory (rebalances)
-;;   multisect  : guides -> (rope -> piece values)       ; the one split primitive
+;;   multisect  : smr [guides] -> (rope -> piece values) ; the one split primitive
 ;;
 ;; A node is a `leaf` (its whole text) or a `branch` (two sub-ropes); both inherit
 ;; from `rope`, which caches what every node shares:
@@ -70,9 +70,9 @@
   [make-summary (-> (-> string? any/c) (-> any/c any/c any/c) smr/c)]
   ;; (make-rope smr) -> the rope builder (fuses, rebalances); parts are strings | ropes
   [make-rope    (-> smr/c (->* () #:rest (listof (or/c string? rope?)) rope?))]
-  ;; (multisect [guides]) -> splitter: t -> n+1 pieces as values; none -> balance halve.
+  ;; (multisect smr [guides]) -> splitter: t -> n+1 pieces as values; no guides -> balance halve.
   ;; Result arity is (add1 (vector-length guides)) -- inexpressible, so the range is `any`.
-  [multisect    (->* () ((vectorof guide/c)) (-> rope? any))]
+  [multisect    (->* (smr/c) ((vectorof guide/c)) (-> rope? any))]
   ;; ((frame smr b a) g) -> g with the outer context baked in
   [frame        (-> smr/c any/c any/c (-> guide/c guide/c))]))
 ;; everything else is internal: leaf?/leaf-rope/branch-rope, rope-join, the descent
@@ -208,10 +208,14 @@
                  (rope-write-text (branch-right r) port)]))
 
 ;; ---------- the boundary ----------
-;; All PART 2 may touch (with `rope-join` above). It never names a struct field, smr,
-;; or rope-leaves below this line. A "side" is the list (summary weight . algebra):
-;; summary FIRST, weight SECOND, the algebra in the tail so combine-info folds opaque
-;; summaries with no external smr. PART 2 reads sides with first/second.
+;; All PART 2 may touch (with `rope-join` above). It never names a struct field below
+;; this line; the algebra arrives as a PARAMETER -- `smr` into multisect, the derived
+;; side-folder `cmb` (= (combine-info smr)) into bisect/frame. A "side" is the rope's structural
+;; measure, the list (summary weight height): summary FIRST, weight (leaf count) SECOND,
+;; height THIRD. Summary and weight are exact monoid measures end-to-end; height is exact
+;; off a node (rope-info) but only NOMINAL under `combine-info` (folded by max, so the identity
+;; side stays an identity) -- fine, because a folded height is never read, only the cached
+;; node value is (pathological?/rebalance). PART 2 reads sides with first/second/third.
 ;;
 ;; THE INVARIANT, where it is used:  (rope-join (rope-split t)) = t.
 ;; A well-formed rope has no fusable adjacent pair, so the seam rope-split exposes
@@ -231,14 +235,16 @@
      (values ((leaf-rope s) (substring str 0 mid))
              ((leaf-rope s) (substring str mid)))]))
 
-(define (rope-info t)                             ; a node's own side: (summary weight . algebra)
-  (let ([s (rope-algebra t)]) (list (rope-summary t) (rope-leaves t) s)))
+(define (rope-info t)                             ; a node's side: (summary weight height)
+  (list (rope-summary t) (rope-leaves t) (rope-height t)))
 
 (define (rope-zero t)                             ; the identity side, for seeding a descent
-  (let ([s (rope-algebra t)]) (list (s "") 0 s)))
+  (list ((rope-algebra t) "") 0 0))               ; empty summary, 0 leaves, height 0
 
-(define (combine-info a b)                        ; fold two adjacent sides, a left of b
-  (let ([s (third a)]) (list (s (first a) (first b)) (+ (second a) (second b)) s)))
+(define ((combine-info smr) a b)                         ; smr -> cmb: fold two adjacent sides, a left of b
+  (list (smr (first a) (first b))                 ; summary    by smr
+        (+   (second a) (second b))               ; leaf count by +
+        (max (third a)  (third b))))              ; height     by max (nominal; see the boundary note)
 
 ;; ============================================================================
 ;; PART 2 -- guided & balanced descent, and the public factory. Speaks only the
@@ -272,12 +278,12 @@
 ;; out), and balance stops at a leaf because its weight is flat. The one base case is a
 ;; leaf too small to halve -- `rope-split` then yields an empty half, and the cut lands
 ;; at the leaf's near or far edge by decide's sign.
-(define (bisect t [decide (on (within-ratio 3) second)])   ; default: the lazy weight-balance
+(define ((bisect cmb) t [decide (on (within-ratio 3) second)])   ; cmb = (combine-info smr): the side-folder
   (let descend ([before (rope-zero t)] [t t] [after (rope-zero t)])
     (define-values (l r) (rope-split t))
     (define il (rope-info l)) (define ir (rope-info r))
-    (define L (combine-info before il))
-    (define R (combine-info ir after))
+    (define L (cmb before il))
+    (define R (cmb ir after))
     (cond
       [(or (zero? (second il)) (zero? (second ir)))   ; a half empty -> a leaf too small to halve
        (if (positive? (decide L R)) (values r l) (values l r))]   ; cut at the far / near edge
@@ -290,26 +296,28 @@
 ;; ---------- frame ----------
 ;; Bake outer context into a guide, agnostic to the combine. `combine` is ordinarily
 ;; `smr` (summary-level -- consumers like zipper-core bake a head's context this way)
-;; but here, for multisect, `combine-info` (side-level). ((frame combine b a) g) wraps
-;; g to read totals: (g (combine b l) (combine r a)).
+;; but here, for multisect, the side-folder `cmb` (= (combine-info smr), side-level). ((frame
+;; combine b a) g) wraps g to read totals: (g (combine b l) (combine r a)).
 (define ((frame combine b a) g)
   (lambda (l r) (g (combine b l) (combine r a))))
 
 ;; ---------- multisect ----------
-;; (multisect [guides]): guides (a vector of boundary guides) -> splitter.
-;; ((multisect guides) t) cuts t at each guide's boundary left to right and returns
-;; the n+1 pieces as values (p0 ++ ... ++ pn = t). Each cut runs bisect over the
-;; remaining tail with the guide framed by `bacc` -- the side of everything cut off so
-;; far -- so it judges against the whole; `bacc` grows by one `combine-info` per cut.
-;; NO guides -- (multisect) or #() -- is the balance halve (`bisect`).
-(define ((multisect [guides #()]) t)
+;; (multisect smr [guides]): smr + guides (a vector of boundary guides) -> splitter.
+;; ((multisect smr guides) t) cuts t at each guide's boundary left to right and returns
+;; the n+1 pieces as values (p0 ++ ... ++ pn = t). It builds the side-folder cmb = (combine-info
+;; smr) once, then each cut runs bisect over the remaining tail with the guide framed by
+;; `bacc` -- the side of everything cut off so far -- so it judges against the whole;
+;; `bacc` grows by one `cmb` per cut. NO guides -- (multisect smr) or #() -- is the
+;; balance halve (`(bisect cmb)`).
+(define ((multisect smr [guides #()]) t)
+  (define cmb (combine-info smr))                              ; smr -> the side-folder, once
   (if (zero? (vector-length guides))
-      (bisect t)                                        ; the balance halve
+      ((bisect cmb) t)                                  ; the balance halve
       (for/fold ([rest t] [bacc (rope-zero t)] [pieces '()]
                  #:result (apply values (reverse (cons rest pieces))))
                 ([g (in-vector guides)])
-        (let-values ([(l r) (bisect rest ((frame combine-info bacc (rope-zero t)) (on g first)))])
-          (values r (combine-info bacc (rope-info l)) (cons l pieces))))))
+        (let-values ([(l r) ((bisect cmb) rest ((frame cmb bacc (rope-zero t)) (on g first)))])
+          (values r (cmb bacc (rope-info l)) (cons l pieces))))))
 
 ;; ---------- make-rope ----------
 ;; The public factory, mirroring make-summary: build the empty + the helpers once,
@@ -318,11 +326,13 @@
 ;; then heals balance (a fresh load folds to a right-leaning spine, so if it came out
 ;; pathologically tall, rebalance it). The whole rebuild tier (pathological?/rebalance)
 ;; lives here: it is make-rope's private balance policy, the only thing it adds over a
-;; dumb fold, and the only PART 2 code reaching below the boundary (whole-node
-;; height/leaf-count, not combinable, and the leaf test). The empty is internal too,
-;; built once like make-summary's `id` (no global cache).
+;; dumb fold. It reads height and leaf count through the boundary side (rope-info) now
+;; that a side carries height, so it names no struct field (the leaf test is height = 0).
+;; The empty is internal too, built once like make-summary's `id` (no global cache).
 (define (make-rope smr)
-  (define mt ((leaf-rope smr) ""))             ; the empty -- once, like make-summary's id
+  (define mt    ((leaf-rope smr) ""))          ; the empty -- once, like make-summary's id
+  (define cmb   (combine-info smr))                   ; the side-folder, once -- beside leaf-rope/branch-rope
+  (define halve (bisect cmb))                  ; this rope's balance-splitter
   (define (chunk s)                            ; a string -> max-leaf-sized pieces
     (for/list ([start (in-range 0 (string-length s) max-leaf)])
       (substring s start (min (string-length s) (+ start max-leaf)))))
@@ -334,15 +344,16 @@
   ;; pathological?: height too tall for weight -- the rebuild trigger. C=3 sits just
   ;; above the ~2.41 a ratio-3 rope guarantees (1/log2(4/3)); K=2 is small-rope slack.
   (define (pathological? t)
-    (> (rope-height t) (+ (* 3 (log (add1 (rope-leaves t)) 2)) 2)))
+    (match-define (list _ leaves height) (rope-info t))   ; off the boundary side, not struct fields
+    (> height (+ (* 3 (log (add1 leaves) 2)) 2)))
   ;; rebalance: rebuild to a tighter balance by recursively bisecting with the stricter
   ;; (within-ratio 2). Leaves are reused (never split); only branches are rebuilt --
   ;; O(leaves * log). rope-join keeps the shape: on a well-formed rope the halves' seam
   ;; is the tree's own, so it branches rather than fuses.
   (define (rebalance t)
-    (if (leaf? t)
+    (if (zero? (third (rope-info t)))                                   ; height 0 = a leaf
         t
-        (let-values ([(l r) (bisect t (on (within-ratio 2) second))])   ; the stricter rebuild ratio
+        (let-values ([(l r) (halve t (on (within-ratio 2) second))])   ; the stricter rebuild ratio
           (rope-join (rebalance l) (rebalance r)))))
   (define (build . parts)
     (define t (foldr rope-join mt (map coerce parts)))   ; map coerce, then fold -- mirrors smr
@@ -364,6 +375,9 @@
       (if (= i 1)
           ((leaf-rope sum) (make-string max-leaf #\x))
           ((branch-rope sum) ((leaf-rope sum) (make-string max-leaf #\x)) (loop (sub1 i))))))
+
+  ;; a loose-rope balance-halve for the tests below: build the side-folder from `sum`.
+  (define (halve t) ((bisect (combine-info sum)) t))
 
   ;; --- build & read ---
   (define r ((make-rope sum) "abcdef"))
@@ -392,24 +406,24 @@
   (check-equal? (sum2 r) 6)                          ; r built under `sum`; its cached value re-folds
 
   ;; --- bisect round-trips text ---
-  (define-values (l rr) (bisect r))
+  (define-values (l rr) (halve r))
   (check-equal? (string-append (~a l) (~a rr)) "abcdef")
 
   ;; --- bisect is total: the empty rope splits into two empties ---
-  (let-values ([(a b) (bisect ((make-rope sum)))])
+  (let-values ([(a b) (halve ((make-rope sum)))])
     (check-true (equal? a ((make-rope sum))))
     (check-true (equal? b ((make-rope sum)))))
 
   ;; --- suppose an empty IS produced (bisecting an atom): rope-join reabsorbs it,
   ;;     never branching it -- the empty-drop runs before any branch ---
-  (let-values ([(lh rh) (bisect ((make-rope sum) "x"))])   ; an atom -> one half is empty
+  (let-values ([(lh rh) (halve ((make-rope sum) "x"))])   ; an atom -> one half is empty
     (check-equal? (~a (rope-join lh rh)) "x"))
   (let ([e ((make-rope sum))] [ab ((make-rope sum) "ab")])
     (check-true   (equal? (rope-join e e) e))             ; empties only -> empty
     (check-equal? (~a (rope-join e (rope-join ab e))) "ab"))  ; empties around content -> dropped
 
   ;; --- bisect rough-balances a spine toward weight-even (within ratio 3) halves ---
-  (let-values ([(sl sr) (bisect (spine 8))])
+  (let-values ([(sl sr) (halve (spine 8))])
     (check-equal? (string-append (~a sl) (~a sr)) (make-string (* 8 max-leaf) #\x))  ; content
     (check-true (<= (max (rope-leaves sl) (rope-leaves sr))            ; within ratio (by leaves)
                     (+ (* 3 (min (rope-leaves sl) (rope-leaves sr))) 1))))
@@ -417,7 +431,7 @@
   ;; --- a guided cut lands at the exact char and fuses back to clean leaves ---
   (let* ([phrase ((make-rope sum) "the quick brown fox jumps over the lazy dog")]
          [at17 (lambda (L R) (cond [(< L 17) 1] [(> L 17) -1] [else 0]))])  ; cut at char 17
-    (let-values ([(lft rgt) ((multisect (vector at17)) phrase)])
+    (let-values ([(lft rgt) ((multisect sum (vector at17)) phrase)])
       (check-equal? (~a lft) "the quick brown f")    ; 17 chars
       (check-equal? (~a rgt) "ox jumps over the lazy dog")
       (check-equal? (string-append (~a lft) (~a rgt))
