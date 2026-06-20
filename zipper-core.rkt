@@ -39,18 +39,25 @@
          "helper-algebras.rkt")     ; fixed arg pass
 
 ;; The contracted surface.  The vocabulary and the two accessor contracts are
-;; defined below, after the zipper struct, since they mention zipper?.  chain is a
-;; macro -- uncontractable -- so it is provided plain; its threaded commands are
-;; checked as cmd/c when it expands into run-chain.
+;; defined below, after the zipper struct, since they mention zipper?.
 (provide
  (contract-out
   [start        (-> smr/c rope? guide-pair/c zipper?)]   ; lifecycle: in (a cursor is required)
   [to-root      cmd/c]                                   ; lifecycle: home
   [zipper-guide guide-accessor/c]                        ; read pair | install | modify
   [zipper-focus focus-accessor/c]                        ; read rope | swap   | modify
-  [on-edges     (-> binop/c binop/c binop/c (-> zipper? any))]        ; the two edge cuts (c may multi-value)
-  [run-chain    (-> zipper? (listof (cons/c any/c cmd/c)) zipper?)])  ; a command run
- chain)
+  [on-edges     (-> binop/c binop/c binop/c (-> zipper? any))]))      ; the two edge cuts (c may multi-value)
+
+;; ---------- internals (dev tooling) ----------
+;; A submodule for dev tooling -- NOT the navigation/editing API.  Reach it with
+;; (require (submod "zipper-core.rkt" internal)); room for more later.  For now the
+;; editing traces: chain (a macro, so provided plain) and the run-chain it expands
+;; to.  The run-chain contract guards DIRECT calls only -- chain expands to the
+;; module-internal run-chain, so its threaded commands never cross that boundary.
+(module+ internal
+  (provide chain
+           (contract-out
+            [run-chain (-> zipper? (listof (cons/c any/c cmd/c)) zipper?)])))
 
 ;; ---------- focus ----------
 (struct head (before rope after) #:transparent)

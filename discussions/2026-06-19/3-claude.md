@@ -17,3 +17,11 @@ An **implementation session**: the navigation machine in `zipper-core.rkt` re-ex
 - **`navigate` stages internalized** over top-level defs — tidier single definition, at the cost of independent testability and the header listing.
 
 **Status:** pare-down landed, 1484 green. (`helper-algebras`/`zipper-core` match HEAD; the outstanding uncommitted diff is the separate rope-core rewrite.)
+
+---
+
+## Addendum — 2026-06-20 — scribble docs; `chain` → internal
+
+- **Scribble docs under `scribble/`** (standalone `.scrbl` per source file, rope-core house style; conventions in `scribble-discussion-conventions.md`): landed `rope-core.scrbl` and `zipper-core.scrbl`. Each source file gains a `(module+ internal)` dev bucket reached via `(require (submod "….rkt" internal))` — rope-core re-exports structural internals (`rope-leaves`, `leaf?`, …) to back examples; zipper-core holds the editing traces.
+- **`chain`/`run-chain` → zipper-core's `internal`** (they print a trace, so dev tooling not the navigation/editing API). The surface is now the five ops `start`/`to-root`/`zipper-guide`/`zipper-focus`/`on-edges`; sexp-edit's `(all-from-out)` drops `chain`; the doc puts it in a "Tracing (dev)" section. Named `internal` over a distinct `dev`/`trace` — a general bucket for later (*parked:* keeping `chain` public as a REPL convenience). *Finding:* `chain` bypasses the `run-chain` contract (it expands to the module-internal `run-chain`), so `cmd/c` guards direct calls only — corrects the old provide comment, and makes public-vs-internal a signalling call, not a safety one.
+- **Tests:** green.

@@ -37,7 +37,7 @@
          sexp-guides cursor     ; cursor conveniences over zipper-core
          edge-contexts anchors edge-modulus
          re-anchor cover        ; the anchor flip as a cursor operation
-         at move spread both slot lift  ; edit verbs: vector -> vector, into zipper-guide (chain re-exported)
+         at move spread both slot lift  ; edit verbs: vector -> vector, into zipper-guide
          (all-from-out "rope-core.rkt")
          (all-from-out "summaries.rkt")
          (all-from-out "zipper-core.rkt"))
@@ -142,8 +142,8 @@
 ;; index (above), so a verb reads the index off the guide, maps it, and rebuilds
 ;; -- no `anchors`, no zipper.  Each is a plain vector -> vector (or a vector
 ;; value) that slots into `zipper-guide`'s existing modify / install faces, e.g.
-;; ((zipper-guide (move f)) z).  (`chain`, the trace pipe, is re-exported from
-;; zipper-core.)
+;; ((zipper-guide (move f)) z).  (`chain`, the trace pipe, now lives in
+;; zipper-core's `internal` submodule.)
 ;;
 ;; `lift` is the one bridge -- an index function (ix -> ix) becomes a guide
 ;; function; `gap-at` collapses to a gap at an index.  `slot` is the index-level

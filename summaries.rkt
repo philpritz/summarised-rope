@@ -2,8 +2,8 @@
 
 ;; Summaries: the general summary combinators plus the concrete summary algebras.
 ;; The general piece is `bundle` (a product of summaries -- see below), then a group
-;; of plain-text metrics -- `char-smr` (the offset axis), the `count-where` family,
-;; `word-smr` (seam-aware word count), and `linecol-smr` (line/column).  The bulk of
+;; of plain-text metrics -- `char-smr` (the offset axis), `word-smr` (seam-aware
+;; word count), and `linecol-smr` (line/column).  The bulk of
 ;; the file is the sexp instance: its monoid (`sexp-smr`) AND the navigation read
 ;; interface `sand-spines`, which reads a cut as the front/back spines the sexp
 ;; layer compares against (sexp-edit.rkt).  Two highlighting seeds follow it: a naive
@@ -46,7 +46,7 @@
 
 (provide bundle                    ; (bundle s1 s2 ...) -> the product smr
          (struct-out bundle-val)   ; the product summary value
-         char-smr count-where      ; plain-text metrics: char offset; chars matching a predicate
+         char-smr                  ; plain-text metric: the char offset axis
          word-smr (struct-out wc)  ; word count (seam-aware); wc-n reads the count
          linecol-smr (struct-out linecol)   ; line/column at a cut: linecol-lines / linecol-cols
          buffer-smr                ; the editor-buffer bundle: sexp navigation + the metrics above
@@ -85,20 +85,14 @@
 ;; off the all-left summary.  Two shapes recur (the law battery in summary-laws.rkt
 ;; checks both):
 ;;   pointwise   (make-summary measure +) -- the measure already distributes over
-;;               ++, so the homomorphism is free (char-smr, count-where).
+;;               ++, so the homomorphism is free (char-smr).
 ;;   seam-aware  a word can straddle a chunk boundary, so the value carries edge
 ;;               state and the combine reconciles the seam, like `sexp+` (word-smr;
 ;;               #f is the identity, short-circuited in the combine).
 
-;; char count -- the offset axis.  string-length is O(1), so the measure is direct
-;; (not (count-where (lambda (_) #t)), which would scan every char).
+;; char count -- the offset axis.  string-length is O(1), so the measure is a
+;; direct length, not a per-char scan.
 (define char-smr (make-summary string-length +))
-
-;; count-where: chars satisfying `pred`.  A family -- str-smr is its quote instance
-;; ((count-where (lambda (c) (char=? c #\"))); whitespace, digits, a search char are
-;; others.  Pointwise: combine = +, identity (the empty count) = 0.
-(define (count-where pred)
-  (make-summary (lambda (s) (for/sum ([c (in-string s)] #:when (pred c)) 1)) +))
 
 ;; word count -- words are maximal non-whitespace runs.  Seam-aware: a word split
 ;; across the cut ("hel" ++ "lo") is ONE word, so the combine drops the straddler.
@@ -596,6 +590,11 @@
 
   ;; --- plain-text metrics: worked values + the law battery ---
   (check-equal? (char-smr "hello") 5)
+  ;; count-where: a summary counting chars satisfying `pred` (pointwise, combine =
+  ;; +).  A general plain-text family -- whitespace here, but also digits, a search
+  ;; char, or quotes (str-smr's measure).  Lives here: nothing in the library uses it.
+  (define (count-where pred)
+    (make-summary (lambda (s) (for/sum ([c (in-string s)] #:when (pred c)) 1)) +))
   (check-equal? ((count-where char-whitespace?) "a b  c") 3)
 
   ;; word count: maximal non-whitespace runs; a word straddling a chunk seam is

@@ -82,6 +82,15 @@
 ;; (equal? x ((make-rope smr))): the empty branch is unconstructable (branch guard),
 ;; so the only 0-leaf rope is an empty leaf.
 
+;; ---------- internals (for inspection and tinkering) ----------
+;; A submodule re-exporting the structural internals -- NOT the stable public
+;; API. Reach them with (require (submod "rope-core.rkt" internal)); they track
+;; the implementation (leaf size, balancing) and may change without notice.
+(module+ internal
+  (provide rope-leaves rope-height            ; structural measures
+           leaf? branch? leaf-text            ; node shape ...
+           branch-left branch-right))         ; ... so you can walk the tree
+
 ;; ============================================================================
 ;; PART 1 -- the dumb rope. Structure, summary, construction, join, display, and
 ;; the boundary PART 2 speaks through. It maintains ONE invariant PART 2 leans on:
