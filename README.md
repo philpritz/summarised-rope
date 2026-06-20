@@ -13,7 +13,7 @@ summary-laws.rkt  optional law battery for summary writers (needs rackcheck)
 ```
 
 `design-notes/` and `discussions/` hold the rationale (dated, decision-level);
-`deprecated*/` are earlier generations kept for reference.
+`deprecated/` holds the earlier generations kept for reference.
 
 ## The pieces
 
