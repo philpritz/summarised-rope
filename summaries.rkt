@@ -62,23 +62,57 @@
          strsexp-in-string?)       ; (strsexp-in-string? L) -> in a string at the cut after L?
 
 ;; ---------- bundle: a product of summaries ----------
-;; (bundle s1 s2 ...) -> the product smr; build & stamp ropes under it.  Its value
-;; is a `bundle-val` carrying every component, keyed by the component's own smr.
-;; Applying a component smr to a bundle-val selects that component (gen:summary-part);
-;; any other smr -- e.g. the product smr itself -- passes it through unchanged.  A
-;; guide/reader for component c reads through it with (on g c) (helper-algebras' `on`).
-(struct bundle-val (slots)              ; slots : #hasheq(component-smr -> value)
+;; (bundle s1 s2 ...) -> the product smr; build & stamp ropes under it.  Its value is
+;; a `bundle-val` carrying every component, keyed by the component's own smr.  Applying
+;; a component smr to a bundle-val selects that component (gen:summary-part); any other
+;; smr -- e.g. the product smr itself -- passes it through unchanged.  A guide/reader
+;; for component c reads through it with (on g c) (helper-algebras' `on`).
+;;
+;; `bundle` is a MACRO (not a function): it captures each component's source identifier
+;; so a bundle-val can print as (bundle [name value] ...) -- see bundle-write.
+
+;; `names` is display-only for the printer
+(struct bundle-val (slots names)        ; slots : #hasheq(smr -> value) ; names : #hasheq(smr -> symbol)
   #:transparent
+  #:property prop:custom-write (lambda (bv port mode) (bundle-write bv port))
   #:methods gen:summary-part
   [(define (part->summary bv smr)
      (if (hash-has-key? (bundle-val-slots bv) smr)
          (hash-ref (bundle-val-slots bv) smr)
          bv))])
 
-(define (bundle . components)
+;; the to-string walk behind prop:custom-write (mirrors rope-write-text): prints
+;; (bundle [name value] ...), one per line, names padded to the widest and sorted
+;; (hasheq order is otherwise unstable).
+(define (bundle-write bv port)
+  (define names (bundle-val-names bv))
+  (define (nm k) (hash-ref names k (lambda () (object-name k))))   ; fallback: 'smr
+  (define entries
+    (sort (for/list ([(k v) (in-hash (bundle-val-slots bv))]) (cons (nm k) v))
+          symbol<? #:key car))
+  (define w (apply max 0 (map (lambda (e) (string-length (symbol->string (car e)))) entries)))
+  (fprintf port "(bundle")
+  (for ([e (in-list entries)])
+    (fprintf port "\n  [~a ~v]" (~a (car e) #:min-width w) (cdr e)))
+  (fprintf port ")"))
+
+;; build the product smr, recording the captured names (display-only) alongside the
+;; slots; both hashes are built once and shared by every value the smr produces.
+(define (make-bundle named)             ; named : (listof (cons smr name|#f))
+  (define components (map car named))
+  (define names (for/hasheq ([p (in-list named)] #:when (cdr p)) (values (car p) (cdr p))))
   (make-summary
-   (lambda (str) (bundle-val (for/hasheq ([c (in-list components)]) (values c (c str)))))
-   (lambda (a b)  (bundle-val (for/hasheq ([c (in-list components)]) (values c (c a b)))))))
+   (lambda (str) (bundle-val (for/hasheq ([c (in-list components)]) (values c (c str))) names))
+   (lambda (a b)  (bundle-val (for/hasheq ([c (in-list components)]) (values c (c a b))) names))))
+
+;; capture each argument's source identifier for the printer; computed args -> #f
+(define-syntax (bundle stx)
+  (syntax-case stx ()
+    [(_ c ...)
+     (with-syntax ([(named ...)
+                    (map (lambda (cc) (if (identifier? cc) #`(cons #,cc '#,cc) #`(cons #,cc #f)))
+                         (syntax->list #'(c ...)))])
+       #'(make-bundle (list named ...)))]))
 
 ;; ---------- plain-text metrics ----------
 ;; General (non-sexp) summaries, each a monoid over a text measure, read at a cut
