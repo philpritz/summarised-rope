@@ -3,43 +3,50 @@
 ;; Summaries: the general summary combinators plus the concrete summary algebras.
 ;; The general piece is `bundle` (a product of summaries -- see below), then a group
 ;; of plain-text metrics -- `char-smr` (the offset axis), `word-smr` (seam-aware
-;; word count), and `linecol-smr` (line/column).  The bulk of
-;; the file is the sexp instance: its monoid (`sexp-smr`) AND the navigation read
-;; interface `sand-spines`, which reads a cut as the front/back spines the sexp
-;; layer compares against (sexp-edit.rkt).  Two highlighting seeds follow it: a naive
+;; word count), and `linecol-smr` (line/column).  The bulk of the file is the sexp
+;; instance: its monoid (`sexp-smr`, recognizing ( ) [ ] { } matched by kind) AND the
+;; navigation read interface `sand-spines`, which reads a cut as the front/back spines
+;; the sexp layer compares against (sexp-edit.rkt).  Two highlighting seeds follow it: a naive
 ;; `str-smr` (a quote count) and `strsexp-smr`, which reuses the sexp algebra gated by
 ;; string state so parens inside strings are discounted, producing index spines like
 ;; `sand-spines` does.  Last, `buffer-smr` bundles `sexp-smr` with the three metrics
 ;; into one editor-buffer product.  The summary *protocol* (make-summary and the gen:summary-part
 ;; extension point) lives in rope-core; this file builds on it.
 ;;
-;; Sexp summary: the opens/closes frontier algebra as a SIGNED struct, for the current
-;; rope-core (`make-summary`).  Two storage decisions distinguish it from the 7-list
-;; version it replaces (deprecated-5 era):
+;; Sexp summary: the opens/closes algebra as a SIGNED `sexp-val` struct, over the
+;; current rope-core (`make-summary`).  It recognizes ( ) [ ] { } matched STRICTLY by
+;; kind -- a closer closes only the INNERMOST open, and only if their shapes pair; a
+;; wrong-kind innermost is a clash that collapses the whole value to the absorbing
+;; 'malformed.  So a value is one of three: #f (empty/identity) | sexp-val | 'malformed.
+;; Three decisions shape the struct:
 ;;
-;; SIGNED STACKS.  `opens` entries are +(k+1), `closes` entries are -(k+1), so a value
-;; reads (frontier ... (negatives) forms (positives) ...) and the slot indexes read
-;; DIRECTLY off the stack heads: front = (car opens) of the before summary, back =
-;; (car closes) of the after summary.  Neither stack ever holds 0 (zero stays the
-;; frame's own boundary).  This reverses 2026-06-07/1 Part D's counts-only storage:
-;; the offset IS storable once both stacks carry it symmetrically and the combine
-;; compensates -- the associativity battery below is the proof.
+;; SIGNED STACKS.  Each `opens` entry is (bracket . +(k+1)), each `closes` entry is
+;; (bracket . -(k+1)), so a value reads (sexp-val head (negatives) forms (positives)
+;; tail) and the slot indexes read DIRECTLY off the stack heads: front = the count at
+;; (car opens) of the before summary, back = the count at (car closes) of the after.
+;; No count is ever 0 (zero stays the frame's own boundary).  The offset IS storable
+;; once both stacks carry it symmetrically and the combine compensates -- the
+;; associativity battery below is the proof.
 ;;
-;; COMPLETION COUNTING.  A frame counts on the enclosing level at its ")" (the pop
-;; bumps what it exposes), not at its "(".  Atoms still count at their first char.
+;; COMPLETION COUNTING.  A frame counts on the enclosing level at its CLOSER (the pop
+;; bumps what it exposes), not at its opener.  Atoms still count at their first char.
 ;; So an open frame's interior leads with the same value as the frame's own start
 ;; slot -- a prefix extension of it -- instead of colliding with the NEXT sibling's
-;; start, and spine comparison is naively lexicographic (see sexp-edit.rkt).  The
-;; old at-"(" bump was inherited from the original fold, never a reasoned choice.
-;; Mirrored on the right: a dangling ")" seeds the level above with the frame it
-;; closed (forms := 1), so `closes` entries count frames whose close is ahead.
-;; Every completion is counted exactly once, by whichever side saw the ")":
-;; a leaf pop bumps; the merge's cancellation does NOT (the right chunk counted it).
+;; start, and spine comparison is naively lexicographic (see sexp-edit.rkt).  Mirrored
+;; on the right: a dangling closer seeds the level above with the frame it closed
+;; (forms := 1), so `closes` entries count frames whose close is ahead.  Every
+;; completion is counted exactly once, by whichever side saw the closer: a leaf pop
+;; bumps; the merge's cancellation does NOT (the right chunk counted it).
 ;;
-;;   closes : dangling ")"s, innermost-first; entry = -(k+1), k = forms preceding it
-;;            at its level (atoms by start, frames by close).
+;; KIND-STRICT, MALFORMED-ABSORBING.  On well-formed input strict matching agrees with
+;; bracket-blind nesting, so a single kind (( ) only) can never clash and stays fully
+;; associative on ANY input; a multi-kind clash goes to 'malformed, and because that is
+;; absorbing the combine stays associative even on malformed fragments.
+;;
+;;   closes : dangling closers, innermost-first; entry = (bracket . -(k+1)), k = forms
+;;            preceding it at its level (atoms by start, frames by close).
 ;;   forms  : complete forms at the current (innermost-open, or top) level.
-;;   opens  : open "("s, innermost-first; entry = +(k+1), k = children so far.
+;;   opens  : open brackets, innermost-first; entry = (bracket . +(k+1)), k = children so far.
 
 (require racket/match
          "rope-core.rkt")          ; make-summary; gen:summary-part (for bundle-val)
@@ -50,12 +57,9 @@
          word-smr (struct-out wc)  ; word count (seam-aware); wc-n reads the count
          linecol-smr (struct-out linecol)   ; line/column at a cut: linecol-lines / linecol-cols
          buffer-smr                ; the editor-buffer bundle: sexp navigation + the metrics above
-         sexp-smr                  ; the smr  -- (sexp-smr str), ((make-rope sexp-smr) ...)
+         sexp-smr                  ; THE sexp summary -- ( ) [ ] { } matched by kind; 'malformed on a clash
+         malformed?                ; (malformed? v) -> #t if a bracket-kind clash collapsed the value
          sand-spines               ; (sand-spines L R) -> (values front back): read a cut as spines
-         paired-sexp-smr           ; SEPARATE kind-matching multi-bracket summary (sexp-smr stays ( )-only)
-         paired-sand-spines        ; (paired-sand-spines L R) -> spines off a paired frontier
-         front-kinds back-kinds    ; bracket glyph per spine level (openers / closers)
-         same-kind? kind           ; bracket-kind predicate + family
          str-smr                   ; (str-smr str) -> quote count: the naive in-string seed
          strsexp-smr               ; sexp algebra gated by string state (parens in strings discounted)
          strsexp-spines            ; (strsexp-spines L R) -> spines, gated by the left's string parity
@@ -159,138 +163,121 @@
 (define linecol-smr (make-summary linecol-leaf linecol+))
 
 ;; ---------- the summary value ----------
-;; #f stays the empty/identity (= (sexp-smr "")).  head/tail flank the three
-;; measure fields, so a value reads left-to-right like the fragment itself.
-(struct frontier
+;; Three states: #f is the empty/identity (= (sexp-smr "")); 'malformed is the
+;; absorbing clash -- a closer meeting a wrong-kind innermost open, anywhere in the
+;; document; otherwise a `sexp-val`.  head/tail flank the three measure fields, so a
+;; value reads left-to-right like the fragment itself.  opens/closes entries are
+;; (bracket . count): opens +(k+1), closes -(k+1), innermost-first.
+(struct sexp-val
   (head             ; class of the first char: 'open | 'close | 'ws | 'atom
-   closes           ; dangling ")"s, innermost-first; entries -(k+1)
+   closes           ; dangling closers, innermost-first; entries (bracket . -(k+1))
    forms            ; complete forms at the current level (a plain count)
-   opens            ; open "("s, innermost-first; entries +(k+1)
+   opens            ; open brackets, innermost-first; entries (bracket . +(k+1))
    tail)            ; class of the last char:  'open | 'close | 'ws | 'atom
   #:transparent)
+(define (malformed? v) (eq? v 'malformed))
 
-;; ---------- char classes ----------
-;; every char falls in exactly one class; head/tail store the class of the
-;; first/last char, so a ")" edge is distinct from a whitespace edge (the four
-;; old booleans collapsed ")"/ws at a head and "("/ws at a tail).
-(define (char-class c)
-  (cond [(char=? c #\() 'open]
-        [(char=? c #\)) 'close]
-        [(char-whitespace? c) 'ws]
-        [else 'atom]))
+;; ---------- brackets: the alphabet ----------
+;; The one source of truth -- each opener paired with its closer.  open?/close? and
+;; `matching` derive from it, as does the tokenizer's bracket char-class.  Matching is
+;; kind-strict: a closer closes only the innermost open of its own shape.
+(define brackets '((#\( . #\)) (#\[ . #\]) (#\{ . #\})))
+(define (open?  c) (and (assv c brackets) #t))
+(define (close? c) (and (memv c (map cdr brackets)) #t))
+(define (matching o c) (eqv? (cdr (assv o brackets)) c))   ; does closer c close opener o?
 
-;; a new form at the current level -- an atom at its first char, or a frame at
-;; its ")" -- counts the same way: top level bumps `forms`, else the innermost
-;; open's entry (the offset rides along: +(k+1)+1 = +((k+1)+1)).
-(define (bump-sexp forms opens)
-  (if (null? opens)
-      (values (add1 forms) opens)
-      (values forms (cons (add1 (car opens)) (cdr opens)))))
-
-;; ---------- leaf measure ----------
-;; Tokenize the fragment into parens and maximal atom runs (whitespace falls
-;; away), then fold the signed completion-counting algebra over the tokens:
-;;   open   pushes a fresh frame, +(0+1);
-;;   atom   registers one form at the current level (bump-sexp);
-;;   close  pops its frame and registers it one level up (bump-sexp on the
-;;          popped stack) -- closing a frame and starting an atom are one act.
-;;          A DANGLING ")" instead seeds a fresh base level (forms := 1) and
-;;          emits -(forms+1), a frame whose close is still ahead.
-;; head/tail are just the first/last char's class -- off the ends, no scanning.
-;; #f stays the empty/identity (the positive? guard).
-(define (sexp-tokens s)                              ; parens and atom runs, in order
-  (map (lambda (t) (char-class (string-ref t 0)))
-       (regexp-match* #px"[()]|[^()\\s]+" s)))       ; -> list of 'open | 'close | 'atom
-
+;; ---------- from-string ----------
+;; Tokenize into brackets and maximal atom runs (whitespace falls away), then fold
+;; the signed completion-counting algebra, kind-strict:
+;;   open   pushes a fresh frame, (bracket . +1);
+;;   atom   registers one form at the current level (`go`);
+;;   close  if the innermost open matches by kind, pops it and registers the frame
+;;          one level up (`go` on the popped stack); a DANGLING closer (nothing open)
+;;          seeds a fresh base level (forms := 1) and emits (bracket . -(forms+1));
+;;          a wrong-kind innermost open is a clash -> 'malformed.
+;; head/tail are the first/last char's class.  #f stays the empty/identity.
 (define (sexp-leaf s)
+  (define (tokens str)                          ; first char of each bracket / atom run
+    (for/list ([t (in-list (regexp-match* #px"[][(){}]|[^][(){}\\s]+" str))]) (string-ref t 0)))
+  (define (class c)
+    (cond [(open? c) 'open] [(close? c) 'close] [(char-whitespace? c) 'ws] [else 'atom]))
   (and (positive? (string-length s))
-       (let-values
-           ([(closes forms opens)
-             (for/fold ([closes '()] [forms 0] [opens '()])
-                       ([tok (in-list (sexp-tokens s))])
-               (case tok
-                 [(atom)  (let-values ([(f o) (bump-sexp forms opens)])
-                            (values closes f o))]
-                 [(open)  (values closes forms (cons 1 opens))]
-                 [(close) (if (null? opens)
-                              (values (cons (- (add1 forms)) closes) 1 opens)
-                              (let-values ([(f o) (bump-sexp forms (cdr opens))])
-                                (values closes f o)))]))])
-         (frontier (char-class (string-ref s 0))
-                   (reverse closes) forms opens
-                   (char-class (string-ref s (sub1 (string-length s))))))))
+       (let loop ([toks (tokens s)] [closes '()] [forms 0] [opens '()])
+         (match toks
+           ['() (sexp-val (class (string-ref s 0)) (reverse closes) forms opens
+                          (class (string-ref s (sub1 (string-length s)))))]
+           [(cons c rest)
+            (define (go stack)                  ; a form completes at `stack`'s top; continue
+              (if (null? stack)
+                  (loop rest closes (add1 forms) stack)
+                  (loop rest closes forms (cons (cons (caar stack) (add1 (cdar stack))) (cdr stack)))))
+            (cond
+              [(open? c)                 (loop rest closes forms (cons (cons c 1) opens))]
+              [(not (close? c))          (go opens)]                                            ; atom
+              [(null? opens)             (loop rest (cons (cons c (- (add1 forms))) closes) 1 opens)]
+              [(matching (caar opens) c) (go (cdr opens))]
+              [else                      'malformed])]))))
 
 ;; ---------- combine ----------
-;; If the left ends mid-atom and the right starts mid-atom, the right's leading atom
-;; is a continuation, not a new form: undo its count.  On -(k+1) the decrement is an
-;; add1 -- -(k+1)+1 = -((k-1)+1).
-(define (drop-start-atom y)
-  (match y
-    [(frontier _ (cons c rest) _ _ _)
-     (struct-copy frontier y [closes (cons (add1 c) rest)])]
-    [_ (struct-copy frontier y [forms (sub1 (frontier-forms y))])]))
-
-;; add n forms to the innermost open; the offset rides along.
-(define (add-inner-sexp opens n) (cons (+ (car opens) n) (cdr opens)))
-
-;; reconcile the left's (forms, opens) against the right's (closes, forms, opens);
-;; all stacks innermost-first, so the matching walks both from the head.
-(define (merge-sexp-frontier forms opens closes right-forms right-opens)
-  (let loop ([forms forms] [stack opens] [closes closes] [out '()])
-    (match closes
-      ['()
-       (if (null? stack)
-           ;; right cancelled every left open: combined = right's frontier
-           (values (reverse out) (+ forms right-forms) right-opens)
-           ;; leftover left opens: the right's completed content becomes children of
-           ;; the innermost leftover frame (its own open frames count only on close)
-           (let ([stack (if (zero? right-forms) stack (add-inner-sexp stack right-forms))])
-             (values (reverse out) forms (append right-opens stack))))]
-      [(cons c rest)
-       (if (pair? stack)
-           ;; close matches an open: pop, no bump -- the right chunk saw the ")" as
-           ;; dangling and already counted the completion (its forms := 1 seed)
-           (loop forms (cdr stack) rest out)
-           ;; still dangling: the left's forms precede it; on -(k+1) the addition is
-           ;; a subtraction -- -(k+1) - f = -((k+f)+1)
-           (loop 0 stack rest (cons (- c forms) out)))])))
-
+;; Cancel the right's closers against the left's opens, kind-strict: a matching
+;; innermost pops (no bump -- the right chunk already counted that form via its
+;; forms := 1 dangling seed); a wrong kind is a clash -> 'malformed.  The right's
+;; leftover forms/opens then nest into the left's innermost surviving open.  If the
+;; left ends mid-atom and the right starts mid-atom, the right's leading atom is a
+;; continuation -- `drop-start` undoes the form it started.  'malformed absorbs; #f
+;; is the identity.
 (define (sexp+ x y)
-  (or (and x y
-           (let ([y (if (and (eq? (frontier-tail x) 'atom)
-                             (eq? (frontier-head y) 'atom))
-                        (drop-start-atom y)
-                        y)])
-             (match-let ([(frontier xh xc xf xo _) x]
-                         [(frontier _  yc yf yo yt) y])
-               (define-values (closes forms opens) (merge-sexp-frontier xf xo yc yf yo))
-               (frontier xh (append xc closes) forms opens yt))))
-      x y))
+  (define (drop-start y)
+    (match y
+      [(sexp-val _ (cons (cons k cv) rest) _ _ _) (struct-copy sexp-val y [closes (cons (cons k (add1 cv)) rest)])]
+      [_ (struct-copy sexp-val y [forms (sub1 (sexp-val-forms y))])]))
+  (define (add-inner stack n) (cons (cons (caar stack) (+ (cdar stack) n)) (cdr stack)))
+  (define (merge x y)
+    (match-define (sexp-val xh xc xf xo _) x)
+    (match-define (sexp-val _  yc yf yo yt) y)
+    (let loop ([forms xf] [stack xo] [closes yc] [out '()])
+      (match closes
+        [(cons (cons k cv) rest)
+         (cond
+           [(null? stack)             (loop 0 stack rest (cons (cons k (- cv forms)) out))]
+           [(matching (caar stack) k) (loop forms (cdr stack) rest out)]
+           [else                      'malformed])]
+        ['() (sexp-val xh (append xc (reverse out))
+                       (if (null? stack) (+ forms yf) forms)
+                       (if (null? stack) yo (append yo (if (zero? yf) stack (add-inner stack yf))))
+                       yt)])))
+  (cond
+    [(eq? x 'malformed) 'malformed]
+    [(eq? y 'malformed) 'malformed]
+    [(not x) y] [(not y) x]
+    [else (merge x (if (and (eq? (sexp-val-tail x) 'atom) (eq? (sexp-val-head y) 'atom)) (drop-start y) y))]))
 
-;; ---------- the smr + #f-safe readers ----------
+;; ---------- the smr ----------
 (define sexp-smr (make-summary sexp-leaf sexp+))
 
-(define (sexp-opens  s) (if s (frontier-opens  s) '()))
-(define (sexp-closes s) (if s (frontier-closes s) '()))
-(define (sexp-forms  s) (if s (frontier-forms  s) 0))
-(define (sexp-head s) (and s (frontier-head s)))   ; class of first char, #f if empty
-(define (sexp-tail s) (and s (frontier-tail s)))   ; class of last char,  #f if empty
+;; ---------- readers (sexp-val?-guarded: safe on #f AND 'malformed) ----------
+(define (sexp-opens  v) (if (sexp-val? v) (sexp-val-opens  v) '()))
+(define (sexp-closes v) (if (sexp-val? v) (sexp-val-closes v) '()))
+(define (sexp-forms  v) (if (sexp-val? v) (sexp-val-forms  v) 0))
+(define (sexp-head v) (and (sexp-val? v) (sexp-val-head v)))   ; class of first char, #f if empty/malformed
+(define (sexp-tail v) (and (sexp-val? v) (sexp-val-tail v)))   ; class of last char
+
 ;; ---------- reading a cut as spines ----------
-;; `sand-spines` is the summary's read interface for navigation -- the one reader
-;; of the frontier fields it needs.  At a cut it reads the all-left `front` and
-;; all-right `back` spines, innermost-first, with the ½ refinement on the HEAD
-;; only: at a form start the head is the raw integer; mid-atom it is pushed
-;; half-way into the atom (the one structurally invisible interior -- frames'
-;; interiors are spine-visible as depth, atoms' are not); whitespace binds to the
-;; previous form, leaning -½.  `front` slots are 0-based (the stored +1 drops at
-;; the read), `back` as stored (-1 = after the last form).  The spine algebra that
-;; compares against these lives in sexp-edit.rkt.
+;; `sand-spines` is the summary's read interface for navigation -- the one reader of
+;; the value's fields it needs.  At a cut it reads the all-left `front` and all-right
+;; `back` spines, innermost-first (slot = the entry's count), with the ½ refinement on
+;; the HEAD only: at a form start the head is the raw integer; mid-atom it is pushed
+;; half-way into the atom (the one structurally invisible interior -- frames' interiors
+;; are spine-visible as depth, atoms' are not); whitespace binds to the previous form,
+;; leaning -½.  `front` slots are 0-based (the stored +1 drops at the read), `back` as
+;; stored (-1 = after the last form).  The spine algebra that compares against these
+;; lives in sexp-edit.rkt.
 
 ;; classify a cut by the two char-classes touching it: tail of L, head of R.
-;;   start  a form begins here (atom or "(")        -- flush, no lean
-;;   end    right before a ")" or the document end  -- flush, no lean
-;;   mid    straddling an atom                       -- front -½, back +½
-;;   lean   whitespace; binds to the previous form   -- front -½, back -½
+;;   start  a form begins here (atom or opener)      -- flush, no lean
+;;   end    right before a closer or the document end -- flush, no lean
+;;   mid    straddling an atom                         -- front -½, back +½
+;;   lean   whitespace; binds to the previous form     -- front -½, back -½
 (define (cut-kind L R)
   (case (sexp-head R)
     [(atom)  (if (eq? (sexp-tail L) 'atom) 'mid 'start)]
@@ -299,106 +286,15 @@
     [(ws)    'lean]
     [else    'end]))                       ; R empty: the document end
 
-;; both full spines at a cut, innermost-first, ½ baked into the heads.
+;; both full spines at a cut, innermost-first, ½ baked into the heads.  Entries are
+;; (bracket . count), so the slot is the cdr.
 (define (sand-spines L R)
-  (match-define (cons fh fr) (append (map sub1 (sexp-opens L)) (list (sexp-forms L))))
-  (match-define (cons bh br) (append (sexp-closes R) (list (- (add1 (sexp-forms R))))))
-  (case (cut-kind L R)
-    [(start end) (values (cons fh fr)        (cons bh br))]
-    [(mid)       (values (cons (- fh 1/2) fr) (cons (+ bh 1/2) br))]
-    [(lean)      (values (cons (- fh 1/2) fr) (cons (- bh 1/2) br))]))
-
-;; ---------- paired: kind-matching multi-bracket sexp summary ----------
-;; A SEPARATE summary from `sexp-smr` (which stays bracket-blind, ( ) only).  Paired
-;; recognizes ( ) [ ] { }, tags each level with its bracket kind, and matches a closer
-;; to the innermost open OF ITS KIND (the HTML-style "pop to the matching bracket",
-;; 2b), skipping wrong-kind opens.  Its frontier entries are (kind . count) pairs (the
-;; bracket glyph + the signed slot), so it carries its OWN leaf / merge / bump / spine
-;; reads -- it shares only the `frontier` struct, the #f-safe readers, and `cut-kind`.
-;; On WELL-FORMED input each closer's match is innermost, so paired's structure equals
-;; a bracket-aware nesting parse; the skip fires only on malformed input, where the
-;; offset accounting is not yet guaranteed associative (skipped opens are dropped).
-(define (opener? c) (memv c '(#\( #\[ #\{)))
-(define (closer? c) (memv c '(#\) #\] #\})))
-(define (kind c) (case c [(#\( #\)) 'round] [(#\[ #\]) 'square] [(#\{ #\}) 'curly] [else #f]))
-(define (same-kind? a b) (eq? (kind a) (kind b)))            ; do two brackets pair?
-(define (bracket-class c)                                    ; head/tail class, brackets included
-  (cond [(opener? c) 'open] [(closer? c) 'close] [(char-whitespace? c) 'ws] [else 'atom]))
-
-(define (paired-tokens s)                                    ; brackets and atom runs, in order
-  (for/list ([t (in-list (regexp-match* #px"[][(){}]|[^][(){}\\s]+" s))])
-    (define c (string-ref t 0))
-    (if (eq? (bracket-class c) 'atom) 'atom c)))             ; -> a bracket char | 'atom
-
-(define (paired-bump forms opens)                            ; bump the innermost open's count
-  (if (null? opens)
-      (values (add1 forms) opens)
-      (match-let ([(cons k n) (car opens)]) (values forms (cons (cons k (add1 n)) (cdr opens))))))
-(define (paired-add-inner opens n)
-  (match-let ([(cons k m) (car opens)]) (cons (cons k (+ m n)) (cdr opens))))
-
-(define (skip-match opens k)        ; pop wrong-kind opens; -> the stack just past the kind match
-  (cond [(null? opens) opens]
-        [(same-kind? (caar opens) k) (cdr opens)]
-        [else (skip-match (cdr opens) k)]))
-(define (has-kind? opens k) (for/or ([e (in-list opens)]) (same-kind? (car e) k)))
-
-(define (paired-leaf s)
-  (and (positive? (string-length s))
-       (let-values
-           ([(closes forms opens)
-             (for/fold ([closes '()] [forms 0] [opens '()])
-                       ([tok (in-list (paired-tokens s))])
-               (cond
-                 [(eq? tok 'atom)       (let-values ([(f o) (paired-bump forms opens)]) (values closes f o))]
-                 [(opener? tok)         (values closes forms (cons (cons tok 1) opens))]
-                 [(has-kind? opens tok) (let-values ([(f o) (paired-bump forms (skip-match opens tok))])  ; close its kind
-                                          (values closes f o))]
-                 [else                  (values (cons (cons tok (- (add1 forms))) closes) 1 opens)]))])    ; dangling
-         (frontier (bracket-class (string-ref s 0))
-                   (reverse closes) forms opens
-                   (bracket-class (string-ref s (sub1 (string-length s))))))))
-
-(define (paired-drop y)             ; the mid-atom continuation, on (kind . count) closes
-  (match y
-    [(frontier _ (cons (cons k cv) rest) _ _ _)
-     (struct-copy frontier y [closes (cons (cons k (add1 cv)) rest)])]
-    [_ (struct-copy frontier y [forms (sub1 (frontier-forms y))])]))
-
-(define (merge-paired forms opens closes right-forms right-opens)
-  (let loop ([forms forms] [stack opens] [closes closes] [out '()])
-    (match closes
-      ['()
-       (if (null? stack)
-           (values (reverse out) (+ forms right-forms) right-opens)
-           (let ([stack (if (zero? right-forms) stack (paired-add-inner stack right-forms))])
-             (values (reverse out) forms (append right-opens stack))))]
-      [(cons (cons k cv) rest)
-       (if (has-kind? stack k)
-           (loop forms (skip-match stack k) rest out)                  ; matching opener -> cancel (drop orphans)
-           (loop 0 stack rest (cons (cons k (- cv forms)) out)))])))   ; no match -> dangling
-
-(define (paired+ x y)
-  (or (and x y
-           (let ([y (if (and (eq? (frontier-tail x) 'atom) (eq? (frontier-head y) 'atom))
-                        (paired-drop y) y)])
-             (match-let ([(frontier xh xc xf xo _) x] [(frontier _ yc yf yo yt) y])
-               (define-values (closes forms opens) (merge-paired xf xo yc yf yo))
-               (frontier xh (append xc closes) forms opens yt))))
-      x y))
-(define paired-sexp-smr (make-summary paired-leaf paired+))
-
-;; paired's spine reads (entries are (kind . count); slot = cdr, glyph = car).  cut-kind
-;; is shared -- it reads only the head/tail classes, which `bracket-class` supplies.
-(define (paired-sand-spines L R)
   (match-define (cons fh fr) (append (map (lambda (e) (sub1 (cdr e))) (sexp-opens L)) (list (sexp-forms L))))
   (match-define (cons bh br) (append (map cdr (sexp-closes R)) (list (- (add1 (sexp-forms R))))))
   (case (cut-kind L R)
     [(start end) (values (cons fh fr)        (cons bh br))]
     [(mid)       (values (cons (- fh 1/2) fr) (cons (+ bh 1/2) br))]
     [(lean)      (values (cons (- fh 1/2) fr) (cons (- bh 1/2) br))]))
-(define (front-kinds L) (map car (sexp-opens L)))   ; open brackets, innermost-first
-(define (back-kinds  R) (map car (sexp-closes R)))  ; close brackets, innermost-first
 
 ;; ---------- string summary (naive) ----------
 ;; The seed of syntax highlighting in the summary: in-string state as a raw quote
@@ -412,19 +308,19 @@
 
 ;; ---------- string + sexp summary (gated) ----------
 ;; Reuses the sexp algebra, gated by string state: a " toggles in/out of a string,
-;; and sexp tokens (parens AND atoms) inside a string are inert -- the whole string
+;; and sexp tokens (brackets AND atoms) inside a string are inert -- the whole string
 ;; collapses to ONE form, an atom with an opaque interior.  Since a fragment cannot
 ;; know whether it BEGINS inside a string (that depends on everything to its left),
-;; the value carries the sexp frontier parsed under each entry mode -- entered in
-;; code, and entered mid-string -- plus the quote count (its parity is the gate).
-;; The combine reuses `sexp+`; the only new logic is selecting which of the right
-;; operand's two frontiers to splice, by the left's parity.
+;; the value carries the sexp-val parsed under each entry mode -- entered in code,
+;; and entered mid-string -- plus the quote count (its parity is the gate).  The
+;; combine reuses `sexp+`; the only new logic is selecting which of the right
+;; operand's two sexp-vals to splice, by the left's parity.
 ;;
-;; Each frontier is built by transforming the text to its code-equivalent: every
+;; Each sexp-val is built by transforming the text to its code-equivalent: every
 ;; string becomes a single delimited placeholder atom ("~") with its interior
 ;; removed, so the existing tokenizer / fold / sand-spines treat the string exactly
 ;; like an atom -- one form, a spine slot, a ½-leaned interior.
-(struct cs (quotes code string) #:transparent)   ; count + frontier-if-code + frontier-if-string
+(struct cs (quotes code string) #:transparent)   ; count + sexp-val-if-code + sexp-val-if-string
 
 (define (transform s start-in-string?)            ; -> code-equivalent text (strings -> "~")
   (define out (open-output-string))
@@ -440,8 +336,8 @@
 
 (define (strsexp-leaf s)
   (cs (for/sum ([c (in-string s)] #:when (char=? c #\")) 1)
-      (sexp-leaf (transform s #f))                ; frontier if entered in code
-      (sexp-leaf (transform s #t))))              ; frontier if entered in a string
+      (sexp-leaf (transform s #f))                ; sexp-val if entered in code
+      (sexp-leaf (transform s #t))))              ; sexp-val if entered in a string
 
 (define (strsexp+ a b)
   (match-define (cs qa ca sa) a)
@@ -454,7 +350,7 @@
 (define strsexp-smr (make-summary strsexp-leaf strsexp+))
 
 ;; reads at a cut: in-string is the left's quote parity; the spines reuse sand-spines
-;; on L's code frontier and R's parity-selected frontier (R's entry mode = L's parity).
+;; on L's code sexp-val and R's parity-selected sexp-val (R's entry mode = L's parity).
 (define (strsexp-in-string? L) (odd? (cs-quotes L)))
 (define (strsexp-spines L R)
   (sand-spines (cs-code L)
@@ -473,8 +369,10 @@
 ;; ============================================================================
 (module+ test
   (require rackunit)
-  (define (opens  x) (sexp-opens  (sexp-smr x)))
-  (define (closes x) (sexp-closes (sexp-smr x)))
+  ;; opens/closes entries are (bracket . count); project the count for these worked
+  ;; values (the bracket glyph -- the car -- isn't checked here).
+  (define (opens  x) (map cdr (sexp-opens  (sexp-smr x))))
+  (define (closes x) (map cdr (sexp-closes (sexp-smr x))))
   (define (forms  x) (sexp-forms  (sexp-smr x)))
 
   ;; --- bundle: a product summary; each component smr selects its own part ---
@@ -520,28 +418,23 @@
   (for* ([str (list "(_ _)" "((a b) c)" "(define (f x) (+ x 1))"
                     "(_ _ " "((a " ")" "a b c" "(((x)))" ") foo (bar"
                     "()" "(())" "(aa (p q) cc)" "((a b) (c d))" "x (y) z"
-                    "q) cc)" "((a b) c")]
+                    "q) cc)" "((a b) c"
+                    ;; multi-bracket (now first-class) and malformed (now absorbing)
+                    "([])" "[()]" "{[()]}" "(let ([x 1] [y 2]) (+ x y))" "(cond [a] [else b])"
+                    "[" "])" "}])" "[)" "[(])" "(]" "([)]" "{[(])}" "[a)")]
          [k (in-range 1 6)])
     (check-equal? (chunked str k) (sexp-smr str)
                   (format "chunk size ~a of ~s" k str)))
 
-  ;; --- paired-sexp-smr: a SEPARATE bracket-aware summary; ( [ { matched by kind.
-  ;;     `sexp-smr` above stays bracket-blind ([] {} are atoms) -- brackets live here. ---
-  (check-true  (same-kind? #\( #\)))  (check-false (same-kind? #\( #\]))
-  (define (popens x) (map cdr (sexp-opens (paired-sexp-smr x))))   ; counts off paired (kind . n) entries
-  (check-equal? (popens "[")     '(1))                             ; [ opens a level
-  (check-equal? (popens "(a [b") '(2 2))                           ; nested, multi-kind
-  (check-equal? (front-kinds (paired-sexp-smr "(a [b")) (list #\[ #\())   ; bracket per level, innermost-first
-  ;; mismatch: the ] does not close the ( -- the ( stays open and the ] dangles
-  (check-equal? (sexp-opens (paired-sexp-smr "(a]")) (list (cons #\( 2)))
-  ;; associativity over WELL-FORMED multi-kind nesting (paired's safe domain)
-  (define (paired-chunked str k)
-    (apply paired-sexp-smr (for/list ([i (in-range 0 (string-length str) k)])
-                             (substring str i (min (string-length str) (+ i k))))))
-  (for* ([str (list "(a [b c] d)" "(let ([x 1] [y 2]) (+ x y))" "{a [b (c)] d}"
-                    "([{}])" "(f [g {h}])" "()" "(aa (p q) cc)")]
-         [k (in-range 1 6)])
-    (check-equal? (paired-chunked str k) (paired-sexp-smr str) (format "paired chunk ~a of ~s" k str)))
+  ;; --- multi-bracket + malformed: ( [ { are first-class, matched by kind ---
+  (check-equal? (opens "[")     '(1))                              ; [ opens a level (count projected off (kind . n))
+  (check-equal? (opens "(a [b") '(2 2))                            ; nested, multi-kind
+  (check-equal? (sexp-smr "([])") (sexp-smr "(())"))               ; balanced: the kinds vanish, one form either way
+  ;; a wrong-kind closer is a clash -> 'malformed (absorbing), wherever it occurs
+  (check-true  (malformed? (sexp-smr "(a]")))
+  (check-true  (malformed? (sexp-smr "[(])")))
+  (check-true  (malformed? (sexp-smr "{[(])}")))
+  (check-false (malformed? (sexp-smr "(a [b] c)")))               ; well-formed multi-kind is fine
 
   ;; --- the summary-law battery (summary-laws.rkt) on realistic generated sexps ---
   (require "summary-laws.rkt" rackcheck)
@@ -618,7 +511,10 @@
           "(_ _ " "((a " ")" "a b c" "(((x)))" ") foo (bar"
           "()" "(())" "(aa (p q) cc)" "((a b) (c d))" "x (y) z"
           "q) cc)" "((a b) c"
-          "" " " "((((" "))))" "atom"))
+          "" " " "((((" "))))" "atom"
+          ;; multi-bracket (well-formed) and malformed (now first-class)
+          "([])" "[()]" "{[()]}" "(cond [(a) b] [else c])" "(f [g {h}])"
+          "[)" "[(])" "([)]"))
 
   (check-summary-laws sexp-smr gen:sexp-doc #:corpus sexp-corpus)
 
