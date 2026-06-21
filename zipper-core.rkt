@@ -1,38 +1,22 @@
 #lang racket
 
 ;; Zipper: structured navigation + editing over a summarised rope, as a stack machine.
+;; The cursor is a `head` (before-summary · focus-rope · after-summary) plus a crumb
+;; stack -- each crumb a closure head -> head that rebuilds the parent focus. The machine
+;; (the lift, the navigate pipeline, the lens) is documented in scribble/zipper-core.scrbl.
 ;;
-;; The cursor is a `head` (before-summary · focus-rope · after-summary) plus a crumb stack --
-;; each crumb a closure head -> head that rebuilds the parent focus.  An op is
-;;
-;;   smr guides -> ((head stack) -> (values head stack))
-;;
-;; and (zipper-lift op ...) hands each op the zipper's own smr and guides, composes them
-;; (rightmost runs first, like compose), NAVIGATES with those guides, and reseals the run
-;; into a zipper -- every lifted run lands with the cursor standing where the guides
-;; point on the new state.  The machine ops -- navigate and its four local stages:
-;;
-;;   navigate  carve . descend . uncrossed . ascend as ONE op -- the lift's permanent last op
-;;   ascend    rise to a fixpoint -- pop+apply crumbs until the focus contains the segment
-;;   descend   strip whole sub-ropes (balance halve + guide reads) to the minimal node
-;;   uncrossed reject a crossed cursor (end boundary left of start)
-;;   carve     cut the focus EXACTLY at the boundaries (`multisect`), middle -> focus
+;; The surface: two three-faced accessors and the lifecycle pair.
+;;   zipper-guide   read | install | modify the cursor   -- moving
+;;   zipper-focus   read | swap    | transform content    -- editing
+;;   start / to-root                                       -- in, home
+;; Both accessors' write faces go through the lift (`zipper-lift`), so EVERY WRITE
+;; NAVIGATES: the cursor lands where the installed guides point on the new state. delete is
+;; ((zipper-focus "") z), insert is a swap at a gap, and edits chain by composition.
 ;;
 ;; A guide is a comparator (L R) -> {-1,0,1}: +1 if the target boundary is right of the
-;; cut, -1 left, 0 at it.  A cursor is a 2-guide vector (start end); a gap is start = end
-;; (an empty focus), a seg is start < end.
-;;
-;; The surface is two three-faced accessors and the lifecycle pair:
-;;   zipper-guide   read | install | modify the cursor    -- moving
-;;   zipper-focus   read | swap | transform the content   -- editing
-;;   start / to-root                                -- in, home
-;; Both accessors' write faces go through the lift, so EVERY WRITE NAVIGATES; delete is
-;; ((zipper-focus "") z), insert is a swap at a gap, and edits chain by composition.  An index
-;; swap (an anchor flip) and a guide swap (a move) are the same operation.  `to-root` is
-;; deliberately outside the lift: homing must not navigate back down; guides survive it.
-;;
-;; zipper-core is guide-AGNOSTIC: it only ever calls a guide, never names its kind.  Structural
-;; guides (sexp, char, ...) live in their own files.
+;; cut, -1 left, 0 at it. A cursor is a 2-guide vector (start end); a gap is start = end
+;; (an empty focus), a seg is start < end. zipper-core is guide-AGNOSTIC -- it only ever
+;; calls a guide, never names its kind; structural guides (sexp, char, ...) live elsewhere.
 
 (require racket/match
          "rope-core.rkt"            ; make-summary make-rope multisect frame rope?
@@ -49,11 +33,10 @@
   [on-edges     (-> binop/c binop/c binop/c (-> zipper? any))]))      ; the two edge cuts (c may multi-value)
 
 ;; ---------- internals (dev tooling) ----------
-;; A submodule for dev tooling -- NOT the navigation/editing API.  Reach it with
-;; (require (submod "zipper-core.rkt" internal)); room for more later.  For now the
-;; editing traces: chain (a macro, so provided plain) and the run-chain it expands
-;; to.  The run-chain contract guards DIRECT calls only -- chain expands to the
-;; module-internal run-chain, so its threaded commands never cross that boundary.
+;; A submodule for dev tooling -- NOT the navigation/editing API. Reach it with
+;; (require (submod "zipper-core.rkt" internal)). The editing traces: `chain` (a macro,
+;; provided plain) and the `run-chain` it expands to. run-chain's contract guards DIRECT
+;; calls only -- chain's expansion stays module-internal, never crossing that boundary.
 (module+ internal
   (provide chain
            (contract-out
@@ -74,10 +57,9 @@
           (lambda (h*) (head b ((make-rope smr) ls (head-rope h*) rs) a))))
 
 ;; ---------- machine ----------
-;; rise: climb one level -- pop a crumb, rebuild the parent focus -- unless the focus
-;; already contains the segment (or the stack is empty), where it stays put.  That
-;; no-op is ascend's fixpoint halt.  contains? -- does the focus bracket the whole
-;; segment? (start watches the left edge, end the right) -- is rise's private test.
+;; rise: climb one level (pop a crumb, rebuild the parent focus) unless the focus already
+;; contains the segment, or the stack is empty -- that no-op is ascend's fixpoint halt.
+;; contains? (rise's private test): does the focus bracket the whole segment?
 (define (rise smr guides)
   (define (contains? h)
     (match-let* ([(head b t a)   h]
@@ -89,13 +71,9 @@
         (values h k)
         (values ((car k) h) (cdr k)))))
 
-;; toward: one descent step.  Halve the focus; an empty half (either side) means the
-;; focus is atomic -- nothing to strip, carve does within-atom -- so halt.  Else frame
-;; the guides into within-focus probes and route by the seam reads:
-;;   gs@seam = +1  -> whole seg right of seam -> descend R
-;;   ge@seam = -1  -> whole seg left  of seam -> descend L
-;;   otherwise (straddle / gap / boundary on seam) -> halt; carve places the exact cut.
-;; The edge reads (gs@left, ge@right) are the out-of-focus guards (= ascend's containment test).
+;; toward: one descent step. Halve the focus; an empty half means an atomic focus (halt --
+;; carve does within-atom). Else frame the guides within-focus and route by the seam reads
+;; (the match clauses below). The edge reads are the out-of-focus guards (= ascend's containment test).
 (define ((toward smr guides) h k)
   (match-let*-values ([((head b t a))   h]
                       [((vector gs ge)) (vector-map (frame smr b a) guides)]  ; framed: read within-focus
@@ -114,11 +92,10 @@
           [(_ _ -1 _) (into (lambda (_) (values mt lt rt)))] ; whole seg left  of seam -> () | lt | rt
           [(_ _ _ _)  (values h k)]))))                      ; straddle / gap / boundary -> halt
 
-;; navigate: the navigation pipeline as ONE op.  ascend to the node containing the
-;; segment, reject a crossed cursor, descend to the minimal node, carve the exact cut.
-;; The four stages are navigate's own locals: ascend/descend are fixpoints of rise/
-;; toward (keyed on the head via (arg 0)); uncrossed/carve frame the head's context
-;; into the guides, then cut the focus.
+;; navigate: the navigation pipeline as ONE op -- ascend . uncrossed . descend . carve
+;; (see scribble/zipper-core.scrbl). The four stages are navigate's own locals: ascend/
+;; descend are fixpoints of rise/toward (keyed on the head via (arg 0)); uncrossed/carve
+;; frame the head's context into the guides, then read / cut the focus.
 (define (navigate smr guides)
   (define ascend  (fixed (rise   smr guides) eq? (arg 0)))   ; rise   to a fixpoint
   (define descend (fixed (toward smr guides) eq? (arg 0)))   ; toward to a fixpoint
@@ -157,16 +134,14 @@
 (define guide-accessor/c (accessor/c (or/c zipper? guide-pair/c procedure?) guide-pair/c))
 (define focus-accessor/c (accessor/c (or/c zipper? content/c    procedure?) rope?))
 
-;; start: a fresh zipper -- the whole rope as focus, the given cursor installed but
-;; NOT yet navigated (the first write/install navigates).  A cursor is required:
-;; there is no guideless zipper, so `guides` is never #f.
+;; start: a fresh zipper -- the whole rope as focus, the given cursor installed but NOT yet
+;; navigated (the first write/install navigates). A cursor is required (no guideless zipper).
 (define (start smr rope gs) (zipper smr gs (head (smr "") rope (smr "")) '()))
 
-;; zipper-lift: hand each op the zipper's own smr and guides, compose (rightmost
-;; runs first) with `navigate` as the permanent last op, reseal.  Every write
-;; funnels through the lift, so every write lands with the cursor standing where
-;; the installed guides point on the new state; (zipper-lift) with no ops is plain
-;; re-navigation.  `pass` (helper-algebras) is the thrush: ((pass smr gs) op) = (op smr gs).
+;; zipper-lift: thread each op the zipper's own (smr gs), compose (rightmost runs first)
+;; with `navigate` as the permanent last op, reseal -- so every write lands where the
+;; guides point (see scribble). (zipper-lift) with no ops is plain re-navigation.
+;; `pass` (helper-algebras) is the thrush: ((pass smr gs) op) = (op smr gs).
 
 (define ((zipper-lift . ops) z)
   (match-define (zipper smr gs h k) z)
@@ -174,14 +149,10 @@
           (map (pass smr gs) (cons navigate ops)))   ; pass threads each op the (smr gs) pair
    h k))
 
-;; zipper-guide: the navigation accessor, three faces dispatched by type.
-;;   (zipper-guide z)       read the installed pair
-;;   ((zipper-guide gs) z)  install a 2-vector      }  both write faces
-;;   ((zipper-guide f) z)   install (f current)     }  navigate
-;; The faces are disjoint at this level (zipper | procedure | 2-vector); modify =
-;; install what f makes of the read.  Composed accessors reach the zipper only
-;; through the write faces, so a composite write navigates exactly once, at the
-;; outermost face.
+;; zipper-guide: the navigation accessor -- three faces by type (see scribble):
+;;   (zipper-guide z) read | ((zipper-guide gs) z) install | ((zipper-guide f) z) modify.
+;; modify = install what f makes of the read. Composed accessors reach the zipper only
+;; through the write faces, so a composite write navigates exactly once, at the outermost face.
 (define zipper-guide
   (local [(define ((install gs) z)
             (match-define (zipper smr _ h k) z)
@@ -192,13 +163,10 @@
       [(? procedure? f)      (modify f)]
       [(and gs (vector _ _)) (install gs)])))
 
-;; zipper-focus: the editing accessor, zipper-guide's twin.
-;;   (zipper-focus z)       read the focus rope
-;;   ((zipper-focus c) z)   swap in content c (string | rope)   }  both write faces
-;;   ((zipper-focus f) z)   swap in (f current)                 }  navigate
-;; delete = ((zipper-focus "") z); insert = a swap at a gap.  set = the lift composed
-;; with the op that swaps the head's rope (make-rope coerces; anchors and stack
-;; pass through untouched, so the edit is safe until navigation lands it).
+;; zipper-focus: the editing accessor, zipper-guide's twin -- three faces (see scribble):
+;;   (zipper-focus z) read | ((zipper-focus c) z) swap content | ((zipper-focus f) z) modify.
+;; delete = ((zipper-focus "") z); insert = a swap at a gap. The swap edits the head's rope
+;; (make-rope coerces); anchors and stack pass through, so the edit is safe until navigation lands it.
 (define zipper-focus
   (local [(define (read z) (head-rope (zipper-head z)))
           (define (((swap c) smr guides) h k)          ; guides unused -- carries the slot for the lift's shape
@@ -211,16 +179,14 @@
       [(? procedure? f) (modify f)]
       [c                (set c)])))
 
-;; to-root: fold every crumb back into the head -- the focus becomes the whole
-;; document.  Deliberately OUTSIDE the lift: homing must not navigate back down;
-;; the guides survive for the next install.
+;; to-root: fold every crumb back into the head -- the focus becomes the whole document.
+;; Deliberately OUTSIDE the lift: homing must not navigate back down; the guides survive.
 (define (to-root z)
   (match-define (zipper smr gs h k) z)
   (zipper smr gs (foldl (lambda (crumb h) (crumb h)) h k) '()))
 
-;; on-edges: the cursor's two edges as cuts, spread over f and g, combined by c
-;; (the spread-combine shape).  Each edge of the focus is a cut on the document;
-;; the focus folds onto the side the edge doesn't face, with the zipper's own smr:
+;; on-edges: the cursor's two edges as cuts, spread over f and g and combined by c (see
+;; scribble). Each edge folds the focus onto the side it doesn't face, with the zipper's smr:
 ;;   ((on-edges c f g) z) = (c (f b (smr m a)) (g (smr b m) a))
 ;;                              '- left edge -'  '- right edge -'
 (define ((on-edges c f g) z)
@@ -230,13 +196,9 @@
 ;; ---------- printing ----------
 ;; The zipper prints as its document with the cursor marked inline:
 ;;   gap -> before‸after        seg -> before⟦focus⟧after
-;; The pieces are read by RE-CUTTING: `multisect` with the installed guides over
-;; the root document.  This LEANS ON THE GUIDE--FOCUS ALIGNMENT: every write
-;; re-navigates, so the cursor stands exactly where its guides point and the
-;; re-cut reproduces the focus.  True by the invariant, but an extra load on it
-;; -- a guide-free reconstruction (off the crumbs) was sketched and not taken
-;; for now.  Every zipper carries a cursor (start requires one), so there is no
-;; guideless case to fall back on.
+;; The pieces are read by RE-CUTTING the root with the installed guides -- which leans on
+;; the guide-focus alignment every write maintains (see scribble; a guide-free
+;; reconstruction off the crumbs was sketched and parked).
 (define (zipper-show z port)
   (define gs   (zipper-guide z))
   (define smr  (zipper-smr z))
@@ -247,11 +209,9 @@
         (fprintf port "~a⟦~a⟧~a" b m a))))
 
 ;; ---------- editing traces ----------
-;; chain: pipe z0 through the commands, printing each command's source beside the
-;; zipper it produces; returns the final zipper.  Guide-AGNOSTIC like the rest of
-;; this file -- it prints a zipper via its prop:custom-write and applies commands
-;; (zipper -> zipper), naming no guide kind.  The macro captures the source (only a
-;; macro can), pairing it with the command for run-chain to thread.
+;; chain: pipe z0 through the commands, printing each command's source beside the zipper it
+;; produces; returns the final zipper. Guide-AGNOSTIC like the rest of the file. The macro
+;; captures the source (only a macro can), pairing it with the command for run-chain to thread.
 (define (run-chain z0 steps)
   (printf "~a~a\n" (~a "(start)" #:min-width 30) z0)
   (for/fold ([z z0]) ([step (in-list steps)])
