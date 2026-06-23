@@ -7,7 +7,7 @@
 ;; Three factories make the surface:
 ;;   smr        : (string | rope | summary)* -> summary    (make-summary)
 ;;   make-rope  : smr -> ((string | rope)* -> rope)         (rebalancing factory)
-;;   multisect  : smr [guides] -> (rope -> piece values)    (the one split primitive)
+;;   multisect  : smr guide... -> (rope -> piece values)    (the one split primitive)
 ;; Two halves behind an abstraction barrier: PART 1 fusing/non-balancing rope, PART 2 guided/balancing descent.
 ;; Narrative in scribble/rope-core.scrbl.
 
@@ -20,7 +20,7 @@
  (contract-out
   [make-summary (-> (-> string? any/c) (-> any/c any/c any/c) smr/c)]
   [make-rope    (-> smr/c (->* () #:rest (listof (or/c string? rope?)) rope?))]
-  [multisect    (->* (smr/c) ((vectorof guide/c)) (-> rope? any))]
+  [multisect    (->* (smr/c) () #:rest (listof guide/c) (-> rope? any))]
   [frame        (-> smr/c any/c any/c (-> guide/c guide/c))]))
 
 (module+ internal
@@ -144,13 +144,14 @@
   (lambda (l r) (g (combine b l) (combine r a))))
 
 ;; the rope's general-purpose splitting operation: n guides -> n+1 pieces.
-(define ((multisect smr [guides #()]) t)
+;; the guides come as rest args -- (multisect smr) bisects, (multisect smr gs ge) carves a cursor.
+(define ((multisect smr . guides) t)
   (define cmb (combine-info smr))
-  (if (zero? (vector-length guides))
+  (if (null? guides)
       ((bisect cmb) t)
       (for/fold ([rest t] [bacc (rope-zero t)] [pieces '()]
                  #:result (apply values (reverse (cons rest pieces))))
-                ([g (in-vector guides)])
+                ([g (in-list guides)])
         (let-values ([(l r) ((bisect cmb) rest ((frame cmb bacc (rope-zero t)) (on g first)))])
           (values r (cmb bacc (rope-info l)) (cons l pieces))))))
 
@@ -234,7 +235,7 @@
 
   (let* ([phrase ((make-rope sum) "the quick brown fox jumps over the lazy dog")]
          [at17 (lambda (L R) (cond [(< L 17) 1] [(> L 17) -1] [else 0]))])
-    (let-values ([(lft rgt) ((multisect sum (vector at17)) phrase)])
+    (let-values ([(lft rgt) ((multisect sum at17) phrase)])
       (check-equal? (~a lft) "the quick brown f")
       (check-equal? (~a rgt) "ox jumps over the lazy dog")
       (check-equal? (string-append (~a lft) (~a rgt))
