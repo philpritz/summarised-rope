@@ -5,7 +5,7 @@
 ;; An index is a spine: the per-level position list, innermost-first.  Slots are
 ;; 0-BASED at every level.  EACH COMPONENT picks the side it reads at its level:
 ;; >= -1/2 against the all-left `front` spine, <= -1 against the all-right `back`
-;; spine -- the pair `sand-spines` reads at a cut (summaries.rkt; -1 = after the
+;; spine -- the pair `sand-spines` reads at a cut (summaries/summaries.rkt; -1 = after the
 ;; last form).  The two ANCHORS of a position differ in the HEAD only: the path
 ;; down to the cut's frame is a left-based name either way, and the head is
 ;; anchored left or right within that frame -- `anchors` returns exactly this
@@ -22,14 +22,15 @@
 ;; replaced the -inf padding).  Targets land on form starts AND on frames' END
 ;; SLOTS -- slot N of an N-child frame.  A guide is one comparison.
 ;;
-;; The layer is a comparison over the spines `sand-spines` reads (summaries.rkt):
+;; The layer is a comparison over the spines `sand-spines` reads (summaries/summaries.rkt):
 ;; everything else is zipper-core.
 
 (require racket/match
          "rope-core.rkt"        ; make-rope multisect frame
-         "summaries.rkt"        ; sexp-smr, sand-spines; bundle
+         "summaries/sexp-summary.rkt"  ; sexp-smr, sand-spines
+         "summaries/summaries.rkt"     ; bundle
          "zipper-core.rkt"      ; start zipper-guide zipper-focus to-root on-edges
-         "helper-algebras.rkt") ; on (bundle projection); lexicographic (spine-cmp)
+         "helper-algebras.rkt") ; on (bundle projection); lexicographic (spine-cmp); make-lens/vref/vdiag (lens vocab)
 
 (provide spine-cmp              ; (spine-cmp front back index) -> -1 | 0 | 1
          slot-guide guide-index ; (slot-guide index) -> guide (carries its index)
@@ -37,9 +38,11 @@
          sexp-guides cursor     ; cursor conveniences over zipper-core
          edge-contexts anchors edge-modulus
          re-anchor cover        ; the anchor flip as a cursor operation
-         at move spread both slot lift  ; edit verbs: vector -> vector, into zipper-guide
+         edge-guide edge-index  ; lenses onto one cursor edge (its guide / its index)
+         at move each both slot  ; edit verbs: gs -> gs, for (updater zipper-guide ...)
          (all-from-out "rope-core.rkt")
-         (all-from-out "summaries.rkt")
+         (all-from-out "summaries/sexp-summary.rkt")
+         (all-from-out "summaries/summaries.rkt")
          (all-from-out "zipper-core.rkt"))
 
 ;; ---------- the comparison ----------
@@ -78,7 +81,7 @@
 ;; ---------- cursor conveniences ----------
 (define (sexp-guides s [e s]) (vector (slot-guide s) (slot-guide e)))
 (define (cursor rope s [e s])                        ; place the cursor, then navigate to it
-  (let ([gs (sexp-guides s e)]) ((zipper-guide gs) (start sexp-smr rope gs))))
+  (let ([gs (sexp-guides s e)]) ((setter zipper-guide gs) (start sexp-smr rope gs))))
 
 ;; ---------- anchors ----------
 ;; each edge of the focus folds the focus to the other side; a gap (empty focus)
@@ -118,19 +121,23 @@
   (define-values (L R) (edge-contexts z i))
   (modulus L R))
 
+;; ---------- edge lenses ----------
+;; A vector-slot lens (`vref`) composed onto `zipper-guide` is a lens straight onto one cursor
+;; edge; one hop more (a guide <-> its index) lands on its index.  Composition is plain `compose`
+;; (the van Laarhoven encoding), and a write through the composite re-navigates once -- the put
+;; bottoms out in zipper-guide's put.
+(define index-of (make-lens (lambda (g) (values (guide-index g) slot-guide))))  ; lens: a guide <-> its index
+(define (edge-guide i) (compose zipper-guide (vref i)))           ; -> the guide at edge i
+(define (edge-index i) (compose zipper-guide (vref i) index-of))  ; -> its index
+
 ;; ---------- re-anchoring ----------
 ;; install edge i's guide re-derived from the chosen side's anchor ('front |
-;; 'back), through the zipper-guide accessor's modify face: the anchor flip as a
-;; cursor operation.  Same position now; the family decides how the edge
-;; follows future edits.
+;; 'back), by setting that edge's lens: the anchor flip as a cursor operation.
+;; Same position now; the family decides how the edge follows future edits.
 (define (re-anchor z i side)
   (define-values (front back) (anchors z i))
   (define g (slot-guide (if (eq? side 'front) front back)))
-  ((zipper-guide (lambda (gs)
-            (if (zero? i)
-                (vector g (vector-ref gs 1))
-                (vector (vector-ref gs 0) g))))
-   z))
+  ((setter (edge-guide i) g) z))
 
 ;; cover: flip the SECOND guide onto its right anchor (the start already reads
 ;; the left).  An edit between the edges then touches neither anchor's side,
@@ -138,26 +145,23 @@
 (define (cover z) (re-anchor z 1 'back))
 
 ;; ---------- command vocabulary ----------
-;; The cursor verbs operate directly on the guide vector: each guide is its own
-;; index (above), so a verb reads the index off the guide, maps it, and rebuilds
-;; -- no `anchors`, no zipper.  Each is a plain vector -> vector (or a vector
-;; value) that slots into `zipper-guide`'s existing modify / install faces, e.g.
-;; ((zipper-guide (move f)) z).  (`chain`, the trace pipe, now lives in
+;; The cursor verbs are vector-lens expressions over the guide vector gs = #(g0 g1).
+;; `index-of` is the one bridge (a guide <-> its index, above); `vref` / `vdiag` are the
+;; vector lenses (helper-algebras).  Each verb is a gs -> gs command (fed to (updater
+;; zipper-guide ...)), e.g. (updater zipper-guide (move f) z):
+;;   gap verbs collapse to a gap -- vdiag views the start guide and fills both edges;
+;;   seg verbs keep the edges distinct -- per-edge (vref i) for `each`, the tuple
+;;   (vref 0 1) for `both`.
+;; `slot` is the index-level helper: map the innermost slot, the frame (cdr) untouched,
+;; so each edge stays in its own sexp.  (`chain`, the trace pipe, now lives in
 ;; zipper-core's `internal` submodule.)
-;;
-;; `lift` is the one bridge -- an index function (ix -> ix) becomes a guide
-;; function; `gap-at` collapses to a gap at an index.  `slot` is the index-level
-;; helper: map the innermost slot, the frame (cdr) untouched, so each edge stays
-;; in its own sexp.
-(define ((lift f) g)  (slot-guide (f (guide-index g))))
-(define (gap-at i)    (let ([g (slot-guide i)]) (vector g g)))
 (define ((slot h) ix) (cons (h (car ix)) (cdr ix)))
 
-(define (both   f)     (lambda (gs) (vector-map (lift f) gs)))             ; map both edges
-(define (spread fl fr) (lambda (gs) (vector ((lift fl) (vector-ref gs 0))  ; map each edge
-                                            ((lift fr) (vector-ref gs 1)))))
-(define (move   f)     (lambda (gs) (gap-at (f (guide-index (vector-ref gs 0)))))) ; -> gap at (f start)
-(define (at     ix)    (lambda (_)  (gap-at ix)))                          ; absolute gap
+(define (at   ix)    (setter  (compose vdiag index-of) ix))                 ; absolute gap at ix
+(define (move f)     (updater (compose vdiag index-of) f))                  ; gap at (f start)
+(define (each fl fr) (compose (updater (compose (vref 0) index-of) fl)      ; each edge its own fn
+                              (updater (compose (vref 1) index-of) fr)))
+(define (both f)     (updater (vref 0 1) (curry map (updater index-of f)))) ; the tuple: f over both edges
 
 ;; ============================================================================
 ;; Tree generators -- in their own submodule, so they import without dragging in
@@ -220,14 +224,14 @@
   (define (cuts rope ix)                  ; where a single index cuts, as strings
     (let-values ([(l r) ((multisect sexp-smr (vector (slot-guide ix))) rope)])
       (cons (~a l) (~a r))))
-  (define (doc z) (~a (zipper-focus (to-root z))))
+  (define (doc z) (~a ((viewer zipper-focus) (to-root z))))
   (define rope ((make-rope sexp-smr) "(aa bb cc)"))
   (define ^bb (front-of "(aa bb cc)" 4))
   (define ^cc (front-of "(aa bb cc)" 7))
 
   (let ([z (cursor rope ^bb)])                       ; gap: replace at an empty focus = insert
-    (check-equal? (~a (zipper-focus z)) "")
-    (check-equal? (doc ((zipper-focus "xx ") z)) "(aa xx bb cc)"))
+    (check-equal? (~a ((viewer zipper-focus) z)) "")
+    (check-equal? (doc ((setter zipper-focus "xx ") z)) "(aa xx bb cc)"))
 
   ;; --- the same navigation through a BUNDLE rope: sexp guides read the sexp
   ;; component out of each bundle value via (on sand-spines sexp-smr) ---
@@ -235,30 +239,30 @@
          [b     (bundle sexp-smr cc)]
          [brope ((make-rope b) "(aa bb cc)")]
          [gs    (sexp-guides ^bb)]
-         [z     ((zipper-guide gs) (start b brope gs))])
-    (check-equal? (~a (zipper-focus z)) "")
-    (check-equal? (doc ((zipper-focus "xx ") z)) "(aa xx bb cc)"))
+         [z     ((setter zipper-guide gs) (start b brope gs))])
+    (check-equal? (~a ((viewer zipper-focus) z)) "")
+    (check-equal? (doc ((setter zipper-focus "xx ") z)) "(aa xx bb cc)"))
 
   (let ([z (cursor rope ^bb ^cc)])                   ; seg [^bb ^cc): half-open
-    (check-equal? (~a (zipper-focus z)) "bb ")
-    (check-equal? (doc ((zipper-focus "XX ") z)) "(aa XX cc)")
-    (check-equal? (doc ((zipper-focus "") z)) "(aa cc)")) ; the empty replace = delete
+    (check-equal? (~a ((viewer zipper-focus) z)) "bb ")
+    (check-equal? (doc ((setter zipper-focus "XX ") z)) "(aa XX cc)")
+    (check-equal? (doc ((setter zipper-focus "") z)) "(aa cc)")) ; the empty replace = delete
 
   ;; back index navigates to the same place
-  (check-equal? (doc ((zipper-focus "xx ") (cursor rope (back-of "(aa bb cc)" 4))))
+  (check-equal? (doc ((setter zipper-focus "xx ") (cursor rope (back-of "(aa bb cc)" 4))))
                 "(aa xx bb cc)")
 
   ;; --- the end slot: slot N of an N-child frame is a real target; both
   ;; anchorings name it (front N | right -1) and appending lands tight after
   ;; the last child ---
-  (check-equal? (doc ((zipper-focus " dd") (cursor rope '(3 0))))  "(aa bb cc dd)")
-  (check-equal? (doc ((zipper-focus " dd") (cursor rope '(-1 0)))) "(aa bb cc dd)")
+  (check-equal? (doc ((setter zipper-focus " dd") (cursor rope '(3 0))))  "(aa bb cc dd)")
+  (check-equal? (doc ((setter zipper-focus " dd") (cursor rope '(-1 0)))) "(aa bb cc dd)")
   (let ([z (cursor ((make-rope sexp-smr) "(aa )") '(1 0))]) ; ws after the last child:
     (check-equal? (~a z) "(aa ‸)"))                         ; lands tight before the close (ws binds left)
 
   ;; --- navigation + editing, nested ---
   (define rope2 ((make-rope sexp-smr) "(aa (p q) cc)"))
-  (check-equal? (doc ((zipper-focus "xx ") (cursor rope2 (front-of "(aa (p q) cc)" 7))))
+  (check-equal? (doc ((setter zipper-focus "xx ") (cursor rope2 (front-of "(aa (p q) cc)" 7))))
                 "(aa (p xx q) cc)")
 
   ;; --- anchors: read both at the cursor, and they diverge under editing ---
@@ -266,7 +270,7 @@
                 [(front back) (anchors z 0)])
     (check-equal? front '(1 0))
     (check-equal? back  '(-3 0))                       ; right head over the left path
-    (define rope1 (zipper-focus (to-root ((zipper-focus "xx ") z))))
+    (define rope1 ((viewer zipper-focus) (to-root ((setter zipper-focus "xx ") z))))
     (check-equal? (cuts rope1 front) (cons "(aa " "xx bb cc)"))  ; left-anchored: stays by aa
     (check-equal? (cuts rope1 back)  (cons "(aa xx " "bb cc)"))) ; right-anchored: stays by bb
 
@@ -295,60 +299,60 @@
   (let* ([z     (cursor rope ^bb)]
          [back* ((flip (edge-modulus z 0)) ^bb)])
     (check-equal? back* '(-3 0))                       ; right head, path untouched
-    (check-equal? (doc ((zipper-focus "xx ") (cursor rope back*))) "(aa xx bb cc)")
-    (define rope1 (zipper-focus (to-root ((zipper-focus "xx ") z))))
+    (check-equal? (doc ((setter zipper-focus "xx ") (cursor rope back*))) "(aa xx bb cc)")
+    (define rope1 ((viewer zipper-focus) (to-root ((setter zipper-focus "xx ") z))))
     (check-equal? (cuts rope1 ^bb)   (cons "(aa " "xx bb cc)"))
     (check-equal? (cuts rope1 back*) (cons "(aa xx " "bb cc)")))
 
   ;; --- the guide lens: an anchor flip installs and re-navigates to the SAME
   ;; gap (L2); editing afterwards behaves as the flipped family ---
   (let* ([z  (cursor rope ^bb)]
-         [zb ((zipper-guide (sexp-guides ((flip (edge-modulus z 0)) ^bb))) z)])
-    (check-equal? (~a (zipper-focus zb)) "")                          ; same gap at flip-time
-    (check-equal? (doc ((zipper-focus "xx ") zb)) "(aa xx bb cc)"))
+         [zb ((setter zipper-guide (sexp-guides ((flip (edge-modulus z 0)) ^bb))) z)])
+    (check-equal? (~a ((viewer zipper-focus) zb)) "")                          ; same gap at flip-time
+    (check-equal? (doc ((setter zipper-focus "xx ") zb)) "(aa xx bb cc)"))
 
   ;; --- re-anchoring the END edge via the lens's modify face makes the cursor
   ;; edit-stable: it keeps covering the focus across replace and delete ---
   (let* ([z  (cursor rope ^bb ^cc)]                            ; both front: end drifts under edits
          [e* ((flip (edge-modulus z 1)) ^cc)]                  ; re-anchor the end's head on its right side
-         [z  ((zipper-guide (lambda (gs) (vector (vector-ref gs 0) (slot-guide e*)))) z)])
-    (check-equal? (~a (zipper-focus z)) "bb ")                        ; same seg at flip-time
-    (let ([z* ((zipper-focus "x1 x2 ") z)])
-      (check-equal? (~a (zipper-focus z*)) "x1 x2 ")                  ; replace re-navigated: still covering
+         [z  ((updater zipper-guide (lambda (gs) (vector (vector-ref gs 0) (slot-guide e*)))) z)])
+    (check-equal? (~a ((viewer zipper-focus) z)) "bb ")                        ; same seg at flip-time
+    (let ([z* ((setter zipper-focus "x1 x2 ") z)])
+      (check-equal? (~a ((viewer zipper-focus) z*)) "x1 x2 ")                  ; replace re-navigated: still covering
       (check-equal? (doc z*) "(aa x1 x2 cc)")
-      (let ([zg ((zipper-focus "") z*)])                            ; delete collapses to the gap
-        (check-equal? (~a (zipper-focus zg)) "")
-        (check-equal? (doc ((zipper-focus "yy ") zg)) "(aa yy cc)")))) ; and editing chains on
+      (let ([zg ((setter zipper-focus "") z*)])                            ; delete collapses to the gap
+        (check-equal? (~a ((viewer zipper-focus) zg)) "")
+        (check-equal? (doc ((setter zipper-focus "yy ") zg)) "(aa yy cc)")))) ; and editing chains on
 
   ;; --- cover: flip the second guide; the right anchor stays fixed while the
   ;; stuff inside is edited ---
   (let* ([z  (cover (cursor rope2 (front-of "(aa (p q) cc)" 7)))] ; covered gap at ^q
-         [z1 ((zipper-focus "x ") z)]
-         [z2 ((zipper-focus "x y ") z1)]
-         [z3 ((zipper-focus "") z2)])
-    (check-equal? (~a (zipper-focus z1)) "x ")
+         [z1 ((setter zipper-focus "x ") z)]
+         [z2 ((setter zipper-focus "x y ") z1)]
+         [z3 ((setter zipper-focus "") z2)])
+    (check-equal? (~a ((viewer zipper-focus) z1)) "x ")
     (check-equal? (doc z1) "(aa (p x q) cc)")
-    (check-equal? (~a (zipper-focus z2)) "x y ")
+    (check-equal? (~a ((viewer zipper-focus) z2)) "x y ")
     (check-equal? (doc z2) "(aa (p x y q) cc)")    ; the interior grew: q held its ground
-    (check-equal? (~a (zipper-focus z3)) "")
+    (check-equal? (~a ((viewer zipper-focus) z3)) "")
     (check-equal? (doc z3) "(aa (p q) cc)"))       ; and shrank back to the gap
 
   (let* ([z (cover (cursor rope ^bb ^cc))])        ; a seg, covered by the same mechanism
-    (check-equal? (~a (zipper-focus z)) "bb ")
-    (check-equal? (doc ((zipper-focus "b1 (b2 b3) ") z)) "(aa b1 (b2 b3) cc)"))
+    (check-equal? (~a ((viewer zipper-focus) z)) "bb ")
+    (check-equal? (doc ((setter zipper-focus "b1 (b2 b3) ") z)) "(aa b1 (b2 b3) cc)"))
 
-  ;; --- the edit verbs: each is a vector -> vector (or vector value) through
-  ;; zipper-guide's existing faces, reading the index straight off the guide.
+  ;; --- the edit verbs: each is a vector -> vector (or vector value) fed through
+  ;; (updater / setter zipper-guide ...), reading the index straight off the guide.
   ;; (indexes in "(aa bb cc)": ^bb = '(1 0), ^cc = '(2 0), end slot = '(3 0))
   (let ([z (cursor rope '(1 0))])                  ; a gap before bb
-    (check-equal? (doc ((zipper-focus "xx ") ((zipper-guide (at '(2 0))) z)))         ; absolute
+    (check-equal? (doc ((setter zipper-focus "xx ") ((updater zipper-guide (at '(2 0))) z)))         ; absolute
                   "(aa bb xx cc)")
-    (check-equal? (doc ((zipper-focus "xx ") ((zipper-guide (move (slot add1))) z)))  ; advance one slot
+    (check-equal? (doc ((setter zipper-focus "xx ") ((updater zipper-guide (move (slot add1))) z)))  ; advance one slot
                   "(aa bb xx cc)")
-    (check-equal? (~a (zipper-focus ((zipper-guide (spread values (slot add1))) z)))  ; open gap -> seg
+    (check-equal? (~a ((viewer zipper-focus) ((updater zipper-guide (each values (slot add1))) z)))  ; open gap -> seg
                   "bb "))
   (let ([z (cursor rope '(1 0) '(2 0))])           ; a seg [bb, cc) = "bb "
-    (check-equal? (~a (zipper-focus ((zipper-guide (both (slot add1))) z))) "cc"))    ; shift both edges
+    (check-equal? (~a ((viewer zipper-focus) ((updater zipper-guide (both (slot add1))) z))) "cc"))    ; shift both edges
 
   ;; ========================================================================
   ;; Document isos -- the tree-first scaffolding for the index battery.

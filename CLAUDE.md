@@ -30,7 +30,8 @@ lines below to match; a file left off is silently never loaded.
 
 @rope-core.rkt
 @zipper-core.rkt
-@summaries.rkt
+@summaries/summaries.rkt
+@summaries/sexp-summary.rkt
 @sexp-edit.rkt
-@summary-laws.rkt
+@summaries/summary-laws.rkt
 @helper-algebras.rkt

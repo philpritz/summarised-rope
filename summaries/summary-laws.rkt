@@ -121,7 +121,7 @@
 
 ;; ============================================================================
 (module+ test
-  (require "rope-core.rkt")          ; make-summary -- a test-only dependency
+  (require "../rope-core.rkt")          ; make-summary -- a test-only dependency
 
   (define cc (make-summary string-length +))
   (define gs:ab (gen:string (gen:one-of (string->list "ab( )")) #:max-length 12))

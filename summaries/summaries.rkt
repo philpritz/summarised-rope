@@ -1,0 +1,148 @@
+#lang racket
+
+;; Summaries: the general summary toolkit, independent of any one structure.
+;;   bundle                        -- a product of summaries (the general combinator)
+;;   char-smr word-smr linecol-smr -- plain-text metrics (offset, word count, line/col)
+;;   buffer-smr                    -- the editor-buffer bundle: sexp navigation + the metrics
+;; The summary protocol (make-summary, gen:summary-part) lives in rope-core; the sexp
+;; instance in sexp-summary.rkt. This file builds on both.
+
+(require racket/match
+         "../rope-core.rkt"
+         "sexp-summary.rkt")
+
+(provide bundle
+         (struct-out bundle-val)
+         char-smr
+         word-smr (struct-out wc)
+         linecol-smr (struct-out linecol)
+         buffer-smr)
+
+;; ---------- bundle: a product of summaries ----------
+;; (bundle c ...) -> a product smr; its value is a bundle-val keyed by each component's own
+;; smr, so (c bv) selects c's slot (gen:summary-part); read through it with (on g c). A MACRO,
+;; to capture component source names for printing (bundle-write).
+
+(struct bundle-val (slots names)        ; slots : #hasheq(smr -> value) ; names : #hasheq(smr -> symbol), display-only
+  #:transparent
+  #:property prop:custom-write (lambda (bv port mode) (bundle-write bv port))
+  #:methods gen:summary-part
+  [(define (part->summary bv smr)
+     (if (hash-has-key? (bundle-val-slots bv) smr)
+         (hash-ref (bundle-val-slots bv) smr)
+         bv))])
+
+(define (bundle-write bv port)
+  (define names (bundle-val-names bv))
+  (define (nm k) (hash-ref names k (lambda () (object-name k))))   ; fallback: 'smr
+  (define entries
+    (sort (for/list ([(k v) (in-hash (bundle-val-slots bv))]) (cons (nm k) v))
+          symbol<? #:key car))                                     ; hasheq order is otherwise unstable
+  (define w (apply max 0 (map (lambda (e) (string-length (symbol->string (car e)))) entries)))
+  (fprintf port "(bundle")
+  (for ([e (in-list entries)])
+    (fprintf port "\n  [~a ~v]" (~a (car e) #:min-width w) (cdr e)))
+  (fprintf port ")"))
+
+(define (make-bundle named)             ; named : (listof (cons smr name|#f))
+  (define components (map car named))
+  (define names (for/hasheq ([p (in-list named)] #:when (cdr p)) (values (car p) (cdr p))))
+  (make-summary
+   (lambda (str) (bundle-val (for/hasheq ([c (in-list components)]) (values c (c str))) names))
+   (lambda (a b)  (bundle-val (for/hasheq ([c (in-list components)]) (values c (c a b))) names))))
+
+(define-syntax (bundle stx)
+  (syntax-case stx ()
+    [(_ c ...)
+     (with-syntax ([(named ...)
+                    (map (lambda (cc) (if (identifier? cc) #`(cons #,cc '#,cc) #`(cons #,cc #f)))
+                         (syntax->list #'(c ...)))])
+       #'(make-bundle (list named ...)))]))
+
+;; ---------- plain-text metrics ----------
+;; Each a monoid over a text measure, read at a cut off the all-left summary. Pointwise
+;; (char-smr) or seam-aware (word-smr): a value straddling a chunk boundary needs edge state
+;; and a combine that reconciles the seam. (summary-laws.rkt checks the battery on both.)
+
+(define char-smr (make-summary string-length +))
+
+(struct wc (head n tail) #:transparent)        ; head/tail: is the edge char non-whitespace? wc-n: the count
+(define (word-leaf s)
+  (and (positive? (string-length s))
+       (wc (not (char-whitespace? (string-ref s 0)))
+           (length (regexp-match* #px"\\S+" s))
+           (not (char-whitespace? (string-ref s (sub1 (string-length s))))))))
+(define (word+ x y)
+  (or (and x y
+           (match-let ([(wc xh xn xt) x] [(wc yh yn yt) y])
+             (wc xh (- (+ xn yn) (if (and xt yh) 1 0)) yt)))  ; both word chars at the seam -> one word, not two
+      x y))
+(define word-smr (make-summary word-leaf word+))
+
+(struct linecol (head lines cols) #:transparent)   ; head: chars before the first newline; cols: after the last (the column)
+(define (linecol-leaf s)
+  (define segs (regexp-split #rx"\n" s))
+  (linecol (string-length (first segs))                                ; before the first newline
+           (for/sum ([c (in-string s)] #:when (char=? c #\newline)) 1)
+           (string-length (last segs))))                               ; after the last newline
+(define (linecol+ x y)
+  (match-let ([(linecol xh xl xc) x] [(linecol yh yl yc) y])
+    (linecol (if (zero? xl) (+ xh yh) xh)     ; head grows until x's own first newline
+             (+ xl yl)
+             (if (zero? yl) (+ xc yc) yc))))   ; column grows until y's own first newline
+(define linecol-smr (make-summary linecol-leaf linecol+))
+
+;; ---------- the buffer bundle ----------
+;; sexp navigation AND the plain-text metrics in one product. Components keyed by smr IDENTITY
+;; (eq?): read each slot through THESE bindings, never a fresh (make-summary ...), or a
+;; different object misses the slot.
+(define buffer-smr (bundle sexp-smr char-smr word-smr linecol-smr))
+
+(module+ test
+  (require rackunit)
+
+  (let* ([cc (make-summary string-length +)]
+         [b  (bundle sexp-smr cc)])
+    (check-equal? (sexp-smr (b "(aa bb")) (sexp-smr "(aa bb"))
+    (check-equal? (cc (b "(aa bb")) 6)
+    (check-equal? (b "(aa" " bb") (b "(aa bb")))
+
+  (check-equal? (char-smr "hello") 5)
+  (define (count-where pred)
+    (make-summary (lambda (s) (for/sum ([c (in-string s)] #:when (pred c)) 1)) +))
+  (check-equal? ((count-where char-whitespace?) "a b  c") 3)
+
+  (define (word-count s) (cond [(word-smr s) => wc-n] [else 0]))
+  (check-equal? (word-count "the quick brown fox") 4)
+  (check-equal? (word-count "  ") 0)
+  (check-equal? (word-count "")  0)
+  (check-equal? (word-smr "hel" "lo") (word-smr "hello"))
+  (check-equal? (word-smr "a b" " c")  (word-smr "a b c"))
+
+  (define (line/col s i)
+    (let ([v (linecol-smr (substring s 0 i))]) (cons (linecol-lines v) (linecol-cols v))))
+  (check-equal? (line/col "ab\ncd\nef" 0) '(0 . 0))
+  (check-equal? (line/col "ab\ncd\nef" 4) '(1 . 1))
+  (check-equal? (line/col "ab\ncd\nef" 6) '(2 . 0))
+  (check-equal? (linecol-head (linecol-smr "ab\ncd\nef")) 2)   ; "ab" before the first newline
+  (check-equal? (linecol-head (linecol-smr "abc"))       3)    ; no newline -> head is the whole string
+  (check-equal? (linecol-smr "ab\nc" "d\nef") (linecol-smr "ab\ncd\nef"))
+
+  (require "summary-laws.rkt" rackcheck)
+  (define gen:text (gen:string (gen:one-of (string->list "ab  \n()")) #:max-length 16))
+  (define metric-corpus (list "" " " "a" "ab cd" "a\nb\n" "\n\n" "  ab  " "x\ny z\nw"))
+  (check-summary-laws char-smr    gen:text #:corpus metric-corpus)
+  (check-summary-laws word-smr    gen:text #:corpus metric-corpus)
+  (check-summary-laws linecol-smr gen:text #:corpus metric-corpus)
+
+  (let ([v (buffer-smr "(define x\ny)")])
+    (check-equal? (char-smr v) 12)
+    (check-equal? (wc-n (word-smr v)) 3)
+    (check-equal? (linecol-lines (linecol-smr v)) 1)
+    (check-equal? (linecol-cols  (linecol-smr v)) 2)
+    (check-equal? (sexp-smr v) (sexp-smr "(define x\ny)")))
+
+  (let ([r ((make-rope buffer-smr) "(define x\ny)")])
+    (check-equal? (char-smr r) 12)
+    (check-equal? (wc-n (word-smr r)) 3)
+    (check-equal? (sexp-smr r) (sexp-smr "(define x\ny)"))))

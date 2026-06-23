@@ -142,6 +142,6 @@ A summary must be lawful for the rope to fold it safely: the combine is an
 associative monoid with @racket[(string-summary "")] as identity, and the leaf
 measure a homomorphism from text concatenation. @racket[char-smr] is all three by
 construction --- @racket[(natural, +, 0)] with @racket[string-length] --- so it
-passes the conformance battery in @tt{summary-laws.rkt} that Section 3 describes.
+passes the conformance battery in @tt{summaries/summary-laws.rkt} that Section 3 describes.
 A summary that fails a law (say @racket[max] for combine) is where guided
 navigation silently goes wrong, which is why the battery exists.

@@ -98,7 +98,7 @@
   ;; (The char guide lives in zipper-core's test module, so reproduce it here.)
   (define ((at n) L R) (cond [(< L n) 1] [(> L n) -1] [else 0]))
   (define (gap n) (vector (at n) (at n)))
-  (define (install p) ((zipper-guide (cdr p)) (car p)))   ; (zipper . guide-vec) -> navigate
+  (define (install p) ((setter zipper-guide (cdr p)) (car p)))   ; (zipper . guide-vec) -> navigate
   (table "nav,char: install midpoint gap, n-char rope        -- expect ~flat (log)"
          (bench install
                 (lambda (n) (let ([g (gap (quotient n 2))])
@@ -194,7 +194,7 @@
     (define target (list (quotient forms 2)))         ; the middle top-level form
     (define counter (box 0))
     (define gs (counting (sexp-guides target) counter))
-    ((zipper-guide gs) (start sexp-smr r gs))         ; navigate, tallying guide calls
+    ((setter zipper-guide gs) (start sexp-smr r gs))         ; navigate, tallying guide calls
     (printf "~a  ~a  ~a  ~a\n"
             (~a d #:min-width 6)
             (~a (string-length (number->string forms)) #:min-width 14)

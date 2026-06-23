@@ -2,9 +2,13 @@
 
 ;; Small algebraic helpers, each self-contained and documented at its definition:
 ;;   iso           a focused (to, from) pair -- a reversible function (detailed below)
+;;   lens          van Laarhoven optic (from a peek s -> (values focus put) via `make-lens`); ops
+;;                 viewer/setter/updater (curried); composes with plain `compose`.  `vref`: a vector-slot lens
 ;;   on            (on op f) a b ... = (op (f a) (f b) ...)
 ;;   arg           ((arg i ...) . xs): project args by 0-based position (the K combinator)
 ;;   pass          ((pass . args) . fs): apply each f to the fixed args, as values (the thrush / fork)
+;;   spread        ((spread h f ...) a ...) = (h (f a) ...): each fn to its arg, then combine (spread-combine)
+;;   variadic      lift a binary op + seed to a variadic left fold (op called acc-first)
 ;;   fixed         iterate an `improve` step to a fixed point
 ;;   lexicographic lift an element comparison to a 3-way order on sequences
 ;;
@@ -25,9 +29,15 @@
          expt-iso                ; iso x Z -> iso, closed on isos
          iso-law?                ; (iso-law? i x): does x round-trip through i?
          check-iso-laws          ; (check-iso-laws i xs): the inputs that don't
+         make-lens               ; (make-lens peek): a coalgebra peek -> a van Laarhoven lens
+         viewer setter updater   ; the lens ops, curried -- viewer a getter, setter/updater commands
+         vref                    ; (vref i ...): lens onto vector slot(s) -- 1 index bare, 2+ a tuple (list)
+         vdiag                   ; vdiag: the diagonal vector lens -- view slot 0, put fills every slot
          on                      ; (on op f): op on its args, each projected through f
          arg                     ; ((arg i ...) . xs): selected args as values (0-based projection / K)
          pass                    ; ((pass . args) . fs): each f applied to the fixed args, as values (thrush / fork)
+         spread                  ; (spread h f ...): apply each fn to its own arg, combine with h (spread-combine)
+         variadic                ; (variadic op id): lift a binary op + seed to a variadic left fold
          fixed                   ; (fixed improve [same? equal?] [key list]): iterate to a fixed point
          lexicographic)          ; ((lexicographic cmp) l1 l2): first-difference 3-way order
 
@@ -57,6 +67,49 @@
 ;; ('() means i is a genuine iso over every one of them).
 (define (check-iso-laws i xs) (filter (lambda (x) (not (iso-law? i x))) xs))
 
+;; A LENS is a (tagged) VAN LAARHOVEN optic.  You build it from the same data as a store
+;; coalgebra -- a peek s -> (values focus put), the focus and a put-back computed together --
+;; but `make-lens` reinterprets that into the functor-polymorphic form (a -> f a) -> (s -> f s).  The
+;; payoff: lenses compose with plain `compose` -- function composition IS lens composition, the
+;; put-backs thread themselves -- so there is no compose-lens (cf. `iso`, which needs compose-iso).
+;;
+;; One body serves view AND set; the op picks the functor f.  view = Const (carries the focus
+;; out, ignores the put); set/over = Identity (a raw value, lets the put run).  Const is the one
+;; whose behaviour departs from the body's default `(put fa)`, so it alone carries a runtime tag,
+;; `const-box` (private -- it never escapes the ops); Identity stays a bare value.  The body's
+;; `if` is fmap, inlined.  The ops curry: viewer a getter (s -> focus), setter/updater commands.
+(struct const-box (v))                                         ; the view tag; private
+(define ((make-lens peek) k)                                   ; a coalgebra -> a van Laarhoven lens
+  (lambda (s)
+    (let-values ([(a put) (peek s)])
+      (let ([fa (k a)]) (if (const-box? fa) fa (put fa))))))
+(define ((viewer  l)   s) (const-box-v ((l const-box)     s))) ; f = Const    -> focus
+(define ((setter  l x) s)              ((l (lambda (_) x)) s))  ; f = Identity -> new whole
+(define ((updater l f) s)              ((l f)              s))  ; f = Identity, focus mapped
+
+;; `vref`: a lens onto vector slot(s).  (vref i) focuses element i (a bare focus, composes onto any
+;; lens by plain `compose`); (vref i j ...) focuses those slots as a TUPLE -- a list, one per index,
+;; the product lens.  Put replaces just those slots.
+(define (vref . is)
+  (make-lens
+   (lambda (v)
+     (define (rd i) (vector-ref v i))
+     (define (wr xs)
+       (let ([w (vector-copy v)])
+         (for ([i (in-list is)] [x (in-list xs)]) (vector-set! w i x))
+         w))
+     (if (null? (cdr is))
+         (values (rd (car is)) (lambda (x) (wr (list x))))    ; one index -> bare focus
+         (values (map rd is)   wr)))))                         ; many -> tuple (list) focus
+
+;; `vdiag`: the diagonal vector lens -- focus = slot 0, put broadcasts ONE value to every slot (a
+;; same-length vector of copies).  put-get/put-put hold, get-put does not -- it forgets the other
+;; slots, collapsing the vector to a uniform one; lawful exactly on the diagonal (all slots equal).
+(define vdiag
+  (make-lens (lambda (v)
+               (values (vector-ref v 0)
+                       (lambda (x) (make-vector (vector-length v) x))))))
+
 ;; `on`: apply op to all its arguments, each projected through f --
 ;; (on op f) a b ... = (op (f a) (f b) ...).  The n-ary generalization of Haskell's
 ;; (binary) Data.Function.on.  With a summary as f it reads each side through that
@@ -80,23 +133,76 @@
 (define ((pass . args) . fs)
   (apply values (map (lambda (f) (apply f args)) fs)))
 
+;; `spread`: spread-combine -- apply each function to its CORRESPONDING argument, then
+;; combine the results with `h` -- ((spread h f g ...) a b ...) = (h (f a) (g b) ...).
+;; SDF's spread-combine; the arity-split (`***` / bimap) followed by a combine, and the
+;; transpose-dual of `pass` (which forks functions over ONE fixed arg-tuple).  Preprocess
+;; a reducer's arguments with it: (variadic (spread combine values coerce) id) folds
+;; coerced args -- `values` passes the accumulator through, `coerce` maps the element.
+;; A case-lambda dispatches on the function count (no list walk): 1..4 functions get an
+;; inlined positional lambda -- no rest-arg list, no map -- so the common arities run at
+;; hand-wrapper speed; 5+ falls to a map/apply tail.
+(define spread
+  (case-lambda
+    [(h f)       (lambda (a)       (h (f a)))]
+    [(h f g)     (lambda (a b)     (h (f a) (g b)))]
+    [(h f g k)   (lambda (a b c)   (h (f a) (g b) (k c)))]
+    [(h f g k l) (lambda (a b c d) (h (f a) (g b) (k c) (l d)))]
+    [(h . fs)    (lambda xs (apply h (map (lambda (f x) (f x)) fs xs)))]))
+
+;; `variadic`: lift a binary `op` (called accumulator-first, (op acc x)) and a seed
+;; `id` to a function of any arity that left-folds its arguments from id --
+;; (variadic op id) a b = (op (op id a) b), (variadic op id) = id.  The 0/1/2-ary
+;; cases (nearly every call) are inlined: they skip the rest-arg list and the foldl
+;; but emit exactly the ops the fold would, so the value is identical for any op/id
+;; (id is folded in even in the base cases -- no identity-law assumption).
+(define (variadic op id)
+  (case-lambda
+    [(a b) (op (op id a) b)]
+    [(a)   (op id a)]
+    [()    id]
+    [xs    (foldl (lambda (x acc) (op acc x)) id xs)]))
+
 ;; `fixed`: iterate `improve` from a seed to a fixed point, returning the seeker.
-;; The seed and `improve` may carry MULTIPLE values: `(compose list improve)`
-;; threads improve's returned values straight back as the next call's arguments,
-;; so a values-in / values-out `improve` loops with no extra plumbing.  Each step's
-;; tuple is held as a list, the converged tuple returned as multiple values.
-;; The halt test is an equality over a projection, mirroring `remove-duplicates`'s
-;; `[same? equal?] #:key` (here both positional): stop when the projected state
-;; stops changing.  `key` is applied to the value-tuple AS ARGUMENTS (not a list) --
-;; default `list` rebuilds the tuple, giving whole-tuple `equal?`, a true fixed
-;; point; pick a selector (`(lambda (h k) h)`) or a derived quantity to settle on
-;; that instead, with an equality (`eq?`, `=`) suited to the projected value.  A step
-;; that no-ops when it can make no progress is the natural halt, so such an `improve`
-;; needs no separate stop test.
-(define ((fixed improve [same? equal?] [key list]) . xs)
-  (let loop ([xs xs])
-    (define ys (apply (compose list improve) xs))   ; improve's values, listed
-    (if (same? (apply key xs) (apply key ys)) (apply values ys) (loop ys))))
+;; The seed and `improve` may carry MULTIPLE values; the halt test is an equality
+;; over a projection, mirroring `remove-duplicates`'s `[same? equal?] #:key` (here
+;; positional): stop when the projected state stops changing.  `key` is applied to
+;; the value-tuple AS ARGUMENTS -- default `list` rebuilds the tuple, giving
+;; whole-tuple `equal?`, a true fixed point; pick a selector (`(arg 0)`) or a derived
+;; quantity to settle on that instead, with an equality (`eq?`, `=`) suited to the
+;; projected value.  A step that no-ops when it can make no progress is the natural
+;; halt, so such an `improve` needs no separate stop test.
+;;
+;; The small arities (1..4 -- navigate's ascend/descend are 2-value) are inlined: the
+;; internal macro `fixed-case` builds, per clause, a loop on named variables with no
+;; per-step list/apply/compose, carrying the running key forward (one key call per step,
+;; not two).  Any larger arity falls to `rest-loop`, which reifies the tuple as a list --
+;; `(compose list improve)` threads the values straight back as the next call's arguments.
+;; `fixed-case` expands at compile time (each clause is straight-line loop code at runtime);
+;; it lives inside `fixed` so its template captures improve/same?/key from this scope.
+(define (fixed improve [same? equal?] [key list])
+  ;; per-clause loop generator -- hand it the clause's vars, get that arity's no-list loop.
+  (define-syntax (fixed-case stx)
+    (syntax-case stx ()
+      [(_ v ...)
+       (with-syntax ([(v* ...) (generate-temporaries #'(v ...))])
+         #'(let loop ([v v] ... [kp (key v ...)])
+             (define-values (v* ...) (improve v ...))
+             (define kp* (key v* ...))
+             (if (same? kp kp*) (values v* ...) (loop v* ... kp*))))]))
+  ;; the generic tail -- the tuple held as a list, for any arity past the inlined ones.
+  (define (rest-loop xs)
+    (let ([step (compose list improve)])
+      (let loop ([xs xs] [kp (apply key xs)])
+        (define ys (apply step xs))
+        (define kp* (apply key ys))
+        (if (same? kp kp*) (apply values ys) (loop ys kp*)))))
+  (case-lambda
+    [(a)       (fixed-case a)]
+    [(a b)     (fixed-case a b)]
+    [(a b c)   (fixed-case a b c)]
+    [(a b c d) (fixed-case a b c d)]
+    [xs        (rest-loop xs)]))
 
 ;; `lexicographic`: lift an element comparison to a 3-way order on sequences.
 ;; Walk two lists in parallel; the first non-zero elementwise verdict (`cmp` ->
@@ -162,10 +268,65 @@
                  (lambda () ((pass 3 4) + * -)) list)
                 '(7 12 -1))                         ; each f applied to (3 4), as values
 
+  ;; --- spread: spread-combine -- each function to its own argument, results combined
+  ;;     by h.  (spread h f g) a b = (h (f a) (g b)).  Small arities inlined, 5+ tail. ---
+  (check-equal? ((spread list add1 sub1) 10 20) '(11 19))               ; (list (add1 10) (sub1 20))
+  (check-equal? ((spread + values string-length) 10 "abc") 13)          ; the make-summary shape: (+ 10 3)
+  (check-equal? ((spread list add1 sub1 -) 1 2 3) '(2 1 -3))            ; arity 3 (macro case)
+  (check-equal? ((spread list add1 sub1 - add1) 1 2 3 4) '(2 1 -3 5))   ; arity 4 (macro case)
+  (check-equal? ((spread list add1 sub1 - add1 sub1) 1 2 3 4 5) '(2 1 -3 5 4)) ; arity 5 (tail)
+  ;; folds coerced args inside variadic, the make-summary shape:
+  (check-equal? ((variadic (spread + values string-length) 0) "ab" "cde") 5)   ; (+ (+ 0 2) 3)
+
+  ;; --- variadic: a binary op + seed lifted to any arity; id folded in every case,
+  ;;     so the inlined small-arity paths match a plain left fold for ANY op/id ---
+  (check-equal? ((variadic + 0))         0)         ; nullary = the seed
+  (check-equal? ((variadic + 0) 5)       5)         ; (+ 0 5)
+  (check-equal? ((variadic + 0) 1 2)     3)         ; (+ (+ 0 1) 2)
+  (check-equal? ((variadic + 0) 1 2 3 4) 10)
+  ;; non-monoidal op: seed and order matter, the inline paths still agree with foldl
+  (check-equal? ((variadic - 0) 5 3) (foldl (lambda (x acc) (- acc x)) 0 '(5 3)))
+  (check-equal? ((variadic cons '()) 1 2 3) '(((() . 1) . 2) . 3))
+
   ;; --- fixed: single value, multiple values, and a key projection ---
   (check-equal? ((fixed (lambda (n) (quotient n 2))) 100) 0)        ; halve to the fixpoint 0
   (check-equal? (call-with-values                                   ; multi-value: (a b) -> (b min)
                  (lambda () ((fixed (lambda (a b) (values b (min a b)))) 5 3)) list)
                 '(3 3))
   ;; stop when a derived quantity settles -- here the tens digit -- via key:
-  (check-equal? ((fixed sub1 = (lambda (n) (quotient n 10))) 25) 24))
+  (check-equal? ((fixed sub1 = (lambda (n) (quotient n 10))) 25) 24)
+  ;; a 3-value tuple exercises a macro-built clause; 5 values fall to the list tail:
+  (check-equal? (call-with-values
+                 (lambda () ((fixed (lambda (a b c) (values b c (min a b c)))) 9 5 7)) list)
+                '(5 5 5))
+  (check-equal? (call-with-values
+                 (lambda () ((fixed (lambda (a b c d e) (values b c d e (min a b c d e)))) 5 4 3 2 1)) list)
+                '(1 1 1 1 1))
+
+  ;; --- lens: a peek wrapped by make-lens, the three ops, composition (plain compose), the laws ---
+  (define fst-lens                          ; a lens onto a list's head
+    (make-lens (lambda (xs) (values (first xs) (lambda (x) (cons x (cdr xs)))))))
+  (check-equal? ((viewer fst-lens) '(1 2 3)) 1)
+  (check-equal? ((setter fst-lens 9) '(1 2 3)) '(9 2 3))
+  (check-equal? ((updater fst-lens add1) '(1 2 3)) '(2 2 3))
+  (check-equal? ((setter fst-lens ((viewer fst-lens) '(1 2))) '(1 2)) '(1 2))      ; get-put
+  (check-equal? ((viewer fst-lens) ((setter fst-lens 9) '(1 2))) 9)                ; put-get
+  (check-equal? ((setter fst-lens 8) ((setter fst-lens 9) '(1 2)))                  ; put-put
+                ((setter fst-lens 8) '(1 2)))
+  ;; composition is Racket's compose -- van Laarhoven threads the put-backs: onto first-of-first
+  (define fst-fst (compose fst-lens fst-lens))
+  (check-equal? ((viewer fst-fst) '((1 2) 3)) 1)
+  (check-equal? ((setter fst-fst 9) '((1 2) 3)) '((9 2) 3))
+  (check-equal? ((viewer (compose)) 42) 42)                                        ; empty = identity
+  (check-equal? ((setter (compose) 9) 42) 9)
+
+  ;; --- vref: single slot (bare focus) and the tuple (product) form, with the laws ---
+  (check-equal? ((viewer (vref 1)) (vector 'a 'b 'c)) 'b)
+  (check-equal? ((setter (vref 1) 'x) (vector 'a 'b 'c)) (vector 'a 'x 'c))
+  (check-equal? ((viewer (vref 0 2)) (vector 'a 'b 'c)) '(a c))
+  (check-equal? ((setter (vref 0 2) '(x y)) (vector 'a 'b 'c)) (vector 'x 'b 'y))
+  (check-equal? ((updater (vref 0 2) reverse) (vector 'a 'b 'c)) (vector 'c 'b 'a))
+  (check-equal? ((setter (vref 0 2) ((viewer (vref 0 2)) (vector 'a 'b 'c))) (vector 'a 'b 'c))
+                (vector 'a 'b 'c))                                                    ; get-put
+  (check-equal? ((viewer (vref 0 2)) ((setter (vref 0 2) '(x y)) (vector 'a 'b 'c)))
+                '(x y)))                                                              ; put-get

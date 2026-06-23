@@ -23,3 +23,21 @@ One step of the zipper's descent to a gap, driven by a single guide
 (`zipper-core.rkt`, commit `1ce4de2`). Superseded by the gap/seg unification
 (`discussions/2026-06-07`), which split descent into a chop-only walk plus a
 separate `carve`.
+
+## `fixed` — the arity-generic fixpoint loop
+
+    (define ((fixed improve [same? equal?] [key list]) . xs)
+      (let loop ([xs xs])
+        (define ys (apply (compose list improve) xs))   ; improve's values, listed
+        (if (same? (apply key xs) (apply key ys)) (apply values ys) (loop ys))))
+
+Iterate a values-in / values-out `improve` to a fixed point, halting when a
+projection (`key`, under `same?`) stops changing (`helper-algebras.rkt`, commit
+`c3898a0`). One loop for every arity — the tuple carried as the list `xs`, and
+`(compose list improve)` reifying improve's multiple return values back into it
+each step. Superseded by an arity-specialized `case-lambda`: clauses 1..4, built
+by an internal `fixed-case` macro, loop on named variables with no per-step
+`apply`/`list`, and this list form survives only as the past-4 tail (`rest-loop`).
+The named-variable loop measured ~3× faster on the 2-value path (navigate's
+`ascend`/`descend`); the list shape is kept here for its one-loop-fits-all
+generality.

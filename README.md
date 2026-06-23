@@ -5,11 +5,13 @@ summarised rope: a rope whose nodes carry a monoid summary, navigated and edited
 through a guide-driven zipper, with S-expressions as the worked structure.
 
 ```text
-rope-core.rkt     persistent summarised rope; the split primitive
-summaries.rkt     bundle + the sexp summary algebra (signed frontier)
-zipper-core.rkt   the cursor machine; guide-agnostic
-sexp-edit.rkt     spine indexes, anchors, re-basing, re-anchoring
-summary-laws.rkt  optional law battery for summary writers (needs rackcheck)
+rope-core.rkt               persistent summarised rope; the split primitive
+zipper-core.rkt             the cursor machine; guide-agnostic
+sexp-edit.rkt               spine indexes, anchors, re-basing, re-anchoring
+summaries/
+  summaries.rkt             the general toolkit: bundle + plain-text metrics + buffer bundle
+  sexp-summary.rkt          the sexp summary algebra (signed frontier) + highlighting seeds
+  summary-laws.rkt          optional law battery for summary writers (needs rackcheck)
 ```
 
 `design-notes/` and `discussions/` hold the rationale (dated, decision-level);
@@ -27,13 +29,22 @@ context into a guide.
 
 ### summaries
 
+The general summary toolkit, independent of any one structure: `bundle` (a
+product summary whose value is keyed by each component's own smr), the plain-text
+metrics `char-smr` / `word-smr` / `linecol-smr`, and `buffer-smr` — the editor
+bundle of the sexp instance with those three.
+
+### sexp-summary
+
 A string summarises to a signed frontier: `opens` — one `+(k+1)` per unclosed
 open, innermost-first — `closes` (`−(k+1)`), `forms` (completed forms), and the
 `head`/`tail` char classes (`'atom | 'open | 'close | 'ws`) of the fragment's
 first and last chars. The combine is associative (battery-tested across
 chunkings), so summaries merge across any split. Counting is by completion: a
 frame counts on its enclosing level at its `)`, which makes spine comparison
-naively lexicographic. The summary fn is `sexp-smr`.
+naively lexicographic. The summary fn is `sexp-smr`. Two highlighting seeds
+follow it: `str-smr` (a naive quote count) and `strsexp-smr` (the sexp algebra
+gated by string state).
 
 ### zipper-core
 
@@ -128,7 +139,7 @@ insert, and the operation is idempotent.
 
 ```powershell
 & "C:\Program Files\Racket\raco.exe" pkg install --batch --auto rackcheck   # once; the law tests need it
-& "C:\Program Files\Racket\raco.exe" test .\rope-core.rkt .\summaries.rkt .\zipper-core.rkt .\sexp-edit.rkt .\summary-laws.rkt .\helper-algebras.rkt
+& "C:\Program Files\Racket\raco.exe" test .\rope-core.rkt .\summaries\summaries.rkt .\summaries\sexp-summary.rkt .\zipper-core.rkt .\sexp-edit.rkt .\summaries\summary-laws.rkt .\helper-algebras.rkt
 ```
 
 1484 tests as of 2026-06-19, the summary-law battery included.

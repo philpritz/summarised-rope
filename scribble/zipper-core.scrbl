@@ -187,3 +187,68 @@ produces, and returns the final zipper. The macro captures each @racket[op]'s so
 The function @racket[chain] expands to: each step pairs a printable label with a
 command, threaded left to right from @racket[z0].
 }
+
+@section{Internals}
+
+These describe the machine behind the surface --- design internals, private to the
+module (distinct from the @racket[internal] submodule's tracing aids above). The whole
+file is @bold{guide-agnostic}: it only ever @emph{calls} a guide, never naming its kind,
+so structural guides (sexp, char, …) live in their own files.
+
+@subsection{The cursor as a stack machine}
+
+A cursor's state is a @deftech{head} --- @racket[before] · @racket[focus] ·
+@racket[after], the focus rope flanked by the summaries of everything outside it ---
+together with a crumb stack, each crumb a closure @racket[(head -> head)] that rebuilds
+the parent focus one level up. An @deftech{op} is
+@racket[(smr guides -> ((head stack) -> (values head stack)))]; the zipper threads its
+own summary and cursor into every op.
+
+@racket[zipper-lift] composes a run of ops (rightmost first, like @racket[compose]) with
+@racket[navigate] fixed as the permanent last op, then reseals into a zipper. So every
+lifted run lands with the cursor standing where its guides point on the new state ---
+@bold{every write navigates}. Installing a cursor and swapping content are both lifted;
+an empty run, @racket[(zipper-lift)], is plain re-navigation. Because navigation is
+re-derived from the guides each time, an index swap (re-anchoring) and a guide swap (a
+move) are the same operation.
+
+@racket[to-root] is the one lifecycle op deliberately @emph{outside} the lift: homing
+folds the crumbs back into the head without navigating down again, and the installed
+cursor survives for the next install.
+
+@subsection{The navigate pipeline}
+
+@racket[navigate] is four stages composed into one op:
+
+@itemlist[
+  @item{@bold{ascend} --- rise to a fixpoint of @racket[rise]: pop a crumb and rebuild
+        the parent focus until the focus brackets the whole segment (its
+        @racket[contains?] test: start not left of the focus's left edge, end not right
+        of its right edge), or the stack empties;}
+  @item{@bold{uncrossed} --- reject a crossed cursor (an end boundary left of start)
+        before any descent;}
+  @item{@bold{descend} --- strip whole sub-ropes to the minimal node, a fixpoint of
+        @racket[toward]: halve the focus and route by the seam reads --- whole segment
+        right of the seam descends right, whole segment left descends left, a straddle /
+        gap / boundary-on-seam halts (carve places the exact cut); an atomic focus (an
+        empty half) halts too;}
+  @item{@bold{carve} --- cut the focus exactly at the two boundaries with
+        @racket[multisect], the middle becoming the new focus.}
+]
+
+The refocusing throughout is @racket[lens]: given a splitter
+@racket[(rope -> (values ls m rs))] it refocuses a head onto @racket[m], folding
+@racket[ls] / @racket[rs] into the anchors, and returns the crumb that rebuilds the
+parent.
+
+@subsection{Printing reconstructs the cursor by re-cutting}
+
+A zipper prints as its document with the cursor marked --- a caret at a gap, brackets
+around a segment. The marked pieces are read by @racket[multisect]-ing the @emph{root}
+document with the installed guides, not off the crumb stack. This leans on the
+guide–focus alignment the lift maintains: because every write re-navigates, the cursor
+stands exactly where its guides point, so the re-cut reproduces the focus.
+
+@margin-note{A guide-free reconstruction off the crumbs was sketched and @bold{parked};
+every zipper carries a cursor (@racket[start] requires one), so there is no guideless
+case to fall back on.}

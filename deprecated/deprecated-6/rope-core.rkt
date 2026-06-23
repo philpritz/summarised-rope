@@ -1,7 +1,7 @@
 #lang racket
 
 (require racket/generic                       ; define-generics -- the gen:summary-part extension point
-         (only-in "helper-algebras.rkt" on))  ; (on f sel) reads each side through sel before deciding
+         (only-in "../../helper-algebras.rkt" on))  ; (on f sel) reads each side through sel before deciding
 
 ;; Summarised rope: a persistent rope of text that caches a user-defined summary
 ;; at every node. Three factories make the whole surface:
