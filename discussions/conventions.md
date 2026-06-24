@@ -208,6 +208,24 @@ decision turned over once needs a line or two per option, not a transcript. The
 test is whether someone arriving at the fork cold could see why it went the way
 it did.
 
+## Write a fork as an ADR — since 2026-06-24
+
+From 2026-06-24, a recorded fork takes the shape of an **Architecture Decision
+Record** (ADR), under these headings:
+
+- **Status** — Accepted, or Superseded by <a later dated fork>. Reverse a decision
+  by writing a *new* dated fork that supersedes this one; never edit the old.
+- **Context** — the forces and the problem driving the decision.
+- **Decision** — what was chosen, in the active voice ("Represent the cursor as …").
+- **Considered options** — each alternative weighed (the parked / rejected / dropped).
+- **Consequences** — what results, *including the downsides accepted* — not just why
+  the winner won.
+
+This refines *Record the alternatives*: the same content (options + reasons), now in
+a fixed shape, plus a **Consequences** section that forces the trade-offs you now
+live with onto the page. Notes **before** 2026-06-24 predate this and keep their forks
+inline, so they read less uniformly — that is expected, not an oversight.
+
 ## Record the reason as a dependency
 
 A decision is only as settled as the reason that drove it, so record the grounds,
