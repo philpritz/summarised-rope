@@ -1,12 +1,9 @@
-# Discussion — 2026-06-24 — de-vectorize + variadic value-stream optic — with Claude
+# Discussion — 2026-06-24 — guide representation: vector vs cons vs list
 
-- **de-vectorized the guide pair** — `multisect` rest-arg guides; `zipper` holds `gs`/`ge`, two
-  guide args through `start`/`navigate` (`rope-core`, `zipper-core`).
-- **variadic value-stream optic** (`helper-algebras`) — `make-lens` peek put-first + N foci;
-  variadic `viewer`/`setter`/`updater`; retired `vref`/`vdiag`; added `list-of`/`lref`/`varg`.
-  `zipper-guide` focuses the guide list; `sexp-edit` verbs ride one `idxs` lens (single nav put).
+Migrated the guide pair to a **list** `(list gs ge)` (storage: two `gs`/`ge` fields); the landing
+is in this session's commits (git log). A list makes the lenses simpler — it's the shape
+`list-of`/`lref` operate on, so the cons lenses (`pair-car/cdr/diag`) and the vector lenses
+(`vref`/`vdiag`) all drop out.
 
-**Fork — guide repr: vector vs cons vs list → list** `(list gs ge)` (storage: two `gs`/`ge`
-fields). A list makes the lenses simpler — it's the shape `list-of`/`lref` operate on, so the cons
-lenses (`pair-car/cdr/diag`) and the vector lenses (`vref`/`vdiag`) all drop out. Vector rejected
-(homogeneous, `vref 0/1`-indexed); cons dropped (mid-session intermediate, needed bespoke pair lenses).
+- **vector** `#(gs ge)` — rejected: homogeneous, `vref 0/1`-indexed.
+- **cons** `(gs . ge)` — dropped (mid-session intermediate): needed bespoke pair lenses.
