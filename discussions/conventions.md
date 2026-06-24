@@ -128,6 +128,16 @@ Do not be eager to write discussion notes. Recording happens when the user
 decides to finish the session, not mid-thread. Keep designing until then;
 write the note only when the user calls the session done.
 
+## Routine changes live in the commits — since 2026-06-24
+
+From 2026-06-24, an implementation or routine change with no major decision or fork
+needs no dedicated session note — the commit(s) are its record (orientation skims
+`git log`). Write a note only when a session decided a **fork** worth keeping (then
+in the ADR shape, per *Write a fork as an ADR*) or did design / exploration whose
+thinking the diff cannot carry. Sessions before this date wrote a note regardless,
+so the older `discussions/` are denser than this rule would now produce — expected,
+not an oversight.
+
 ## Two kinds of session
 
 Sessions fall into two categories; name the category in the note's opening line
