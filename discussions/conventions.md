@@ -9,7 +9,9 @@
 1. This file, in full.
 2. `design-notes/nomenclature.md` — the project's working vocabulary.
 3. The latest discussions.
-4. The source files.
+4. Recent `git log` — skim the last several commits; the messages record what landed
+   (refactors, surface changes) and live in git, not in the notes.
+5. The source files.
 
 ---
 
