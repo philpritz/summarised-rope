@@ -29,10 +29,11 @@
          expt-iso                ; iso x Z -> iso, closed on isos
          iso-law?                ; (iso-law? i x): does x round-trip through i?
          check-iso-laws          ; (check-iso-laws i xs): the inputs that don't
-         make-lens               ; (make-lens peek): a coalgebra peek -> a van Laarhoven lens
-         viewer setter updater   ; the lens ops, curried -- viewer a getter, setter/updater commands
-         vref                    ; (vref i ...): lens onto vector slot(s) -- 1 index bare, 2+ a tuple (list)
-         vdiag                   ; vdiag: the diagonal vector lens -- view slot 0, put fills every slot
+         make-lens               ; (make-lens peek): a coalgebra peek -> a variadic van Laarhoven lens
+         viewer setter updater   ; the lens ops, curried -- viewer a getter (foci as values), setter/updater commands
+         list-of                 ; (list-of view set): map a per-element lens over a list -- ONE focus (the list)
+         lref                    ; (lref i ...): index a list, fanning to N foci; length-safe
+         varg                    ; (varg i ...): rearrange the value stream by position -- the lens twin of `arg`
          on                      ; (on op f): op on its args, each projected through f
          arg                     ; ((arg i ...) . xs): selected args as values (0-based projection / K)
          pass                    ; ((pass . args) . fs): each f applied to the fixed args, as values (thrush / fork)
@@ -67,48 +68,60 @@
 ;; ('() means i is a genuine iso over every one of them).
 (define (check-iso-laws i xs) (filter (lambda (x) (not (iso-law? i x))) xs))
 
-;; A LENS is a (tagged) VAN LAARHOVEN optic.  You build it from the same data as a store
-;; coalgebra -- a peek s -> (values focus put), the focus and a put-back computed together --
-;; but `make-lens` reinterprets that into the functor-polymorphic form (a -> f a) -> (s -> f s).  The
-;; payoff: lenses compose with plain `compose` -- function composition IS lens composition, the
-;; put-backs thread themselves -- so there is no compose-lens (cf. `iso`, which needs compose-iso).
+;; A LENS is a VARIADIC VAN LAARHOVEN optic over the VALUE STREAM.  It focuses one OR MORE values
+;; inside a structure that is itself one or more values, built from a store coalgebra:
+;;   peek : structvals ... -> (values put focus ...)   ; the put-back FIRST, then the foci as VALUES
+;;   put  : newfocus ...   -> structvals ...           ; rebuild the structure from new foci
+;; Composition is plain `compose` -- function composition IS lens composition -- and now carries N
+;; values per hop: an outer lens's foci become the inner lens's structvals, so the arities must line
+;; up at each seam.  (put comes FIRST because, with variadic foci, that is the only fixed position;
+;; and `(compose f g)` already does the multi-value threading `call-with-values` would.)
 ;;
-;; One body serves view AND set; the op picks the functor f.  view = Const (carries the focus
-;; out, ignores the put); set/over = Identity (a raw value, lets the put run).  Const is the one
-;; whose behaviour departs from the body's default `(put fa)`, so it alone carries a runtime tag,
-;; `const-box` (private -- it never escapes the ops); Identity stays a bare value.  The body's
-;; `if` is fmap, inlined.  The ops curry: viewer a getter (s -> focus), setter/updater commands.
-(struct const-box (v))                                         ; the view tag; private
-(define ((make-lens peek) k)                                   ; a coalgebra -> a van Laarhoven lens
-  (lambda (s)
-    (let-values ([(a put) (peek s)])
-      (let ([fa (k a)]) (if (const-box? fa) fa (put fa))))))
-(define ((viewer  l)   s) (const-box-v ((l const-box)     s))) ; f = Const    -> focus
-(define ((setter  l x) s)              ((l (lambda (_) x)) s))  ; f = Identity -> new whole
-(define ((updater l f) s)              ((l f)              s))  ; f = Identity, focus mapped
+;; One body serves view AND set; the op picks the functor f.  view = Const (carries the foci out,
+;; runs no put); set/over = Identity (raw values, the put runs).  Const alone departs from the
+;; default `(apply put ...)`, so it carries the private tag `const-box` (holding the foci as a list);
+;; Identity stays bare values.  The ops curry: viewer a getter (-> the foci as MULTIPLE VALUES; one
+;; focus -> one value), setter takes one value per focus, updater one function per focus.
+(struct const-box (vs))                                        ; the view tag; private; foci as a list
+(define ((make-lens peek) k)                                   ; a coalgebra -> a variadic vL lens
+  (compose                                                     ; (compose handle peek): peek, then handle
+   (lambda (put . foci)
+     (let ([r (apply (compose list k) foci)])                  ; run k on the foci, collect its values
+       (if (and (pair? r) (null? (cdr r)) (const-box? (car r)))
+           (car r)                                             ; view     -> lone const-box: skip the put
+           (apply put r))))                                    ; set/over -> rebuild from the new foci
+   peek))
+(define ((viewer  l)      . s) (apply values (const-box-vs (apply (l (lambda foci (const-box foci))) s))))
+(define ((setter  l . xs) . s) (apply (l (lambda _    (apply values xs))) s))
+(define ((updater l . fs) . s) (apply (l (lambda foci (apply values (map (lambda (f x) (f x)) fs foci)))) s))
 
-;; `vref`: a lens onto vector slot(s).  (vref i) focuses element i (a bare focus, composes onto any
-;; lens by plain `compose`); (vref i j ...) focuses those slots as a TUPLE -- a list, one per index,
-;; the product lens.  Put replaces just those slots.
-(define (vref . is)
-  (make-lens
-   (lambda (v)
-     (define (rd i) (vector-ref v i))
-     (define (wr xs)
-       (let ([w (vector-copy v)])
-         (for ([i (in-list is)] [x (in-list xs)]) (vector-set! w i x))
-         w))
-     (if (null? (cdr is))
-         (values (rd (car is)) (lambda (x) (wr (list x))))    ; one index -> bare focus
-         (values (map rd is)   wr)))))                         ; many -> tuple (list) focus
+;; `list-of`: a per-element (view, set) lifted over a list -- a SINGLE focus, the list of views.
+;; Keeps the chain single-value; `lref` below is where it fans out.
+(define (list-of view set)
+  (make-lens (lambda (xs) (values (lambda (ys) (map set ys)) (map view xs)))))
 
-;; `vdiag`: the diagonal vector lens -- focus = slot 0, put broadcasts ONE value to every slot (a
-;; same-length vector of copies).  put-get/put-put hold, get-put does not -- it forgets the other
-;; slots, collapsing the vector to a uniform one; lawful exactly on the diagonal (all slots equal).
-(define vdiag
-  (make-lens (lambda (v)
-               (values (vector-ref v 0)
-                       (lambda (x) (make-vector (vector-length v) x))))))
+;; `lref`: index a list at positions `is`, fanning the focus into N values (the picked elements);
+;; the put writes them back into a copy.  Length-safe -- it overwrites slots, never reshapes.
+(define (lref . is)
+  (make-lens (lambda (xs)
+    (define v (list->vector xs))
+    (apply values
+           (lambda nf (define w (vector-copy v))
+                      (for ([i (in-list is)] [x (in-list nf)]) (vector-set! w i x))
+                      (vector->list w))
+           (map (lambda (i) (vector-ref v i)) is)))))
+
+;; `varg`: the lens twin of `arg` -- focus the values at positions `is`, in that order; the put
+;; writes them back.  ((viewer (varg . is)) ...) = ((arg . is) ...).  Lawful for distinct positions
+;; (a selection / permutation); a repeated position is a (lossy) diagonal -- put-get fails.
+(define (varg . is)
+  (make-lens (lambda structvals
+    (define v (list->vector structvals))
+    (apply values
+           (lambda nf (define w (vector-copy v))
+                      (for ([i (in-list is)] [x (in-list nf)]) (vector-set! w i x))
+                      (apply values (vector->list w)))
+           (map (lambda (i) (vector-ref v i)) is)))))
 
 ;; `on`: apply op to all its arguments, each projected through f --
 ;; (on op f) a b ... = (op (f a) (f b) ...).  The n-ary generalization of Haskell's
@@ -303,9 +316,9 @@
                  (lambda () ((fixed (lambda (a b c d e) (values b c d e (min a b c d e)))) 5 4 3 2 1)) list)
                 '(1 1 1 1 1))
 
-  ;; --- lens: a peek wrapped by make-lens, the three ops, composition (plain compose), the laws ---
-  (define fst-lens                          ; a lens onto a list's head
-    (make-lens (lambda (xs) (values (first xs) (lambda (x) (cons x (cdr xs)))))))
+  ;; --- lens: a peek wrapped by make-lens (put FIRST), the three ops, composition, the laws ---
+  (define fst-lens                          ; a lens onto a list's head (one focus)
+    (make-lens (lambda (xs) (values (lambda (x) (cons x (cdr xs))) (first xs)))))
   (check-equal? ((viewer fst-lens) '(1 2 3)) 1)
   (check-equal? ((setter fst-lens 9) '(1 2 3)) '(9 2 3))
   (check-equal? ((updater fst-lens add1) '(1 2 3)) '(2 2 3))
@@ -320,13 +333,19 @@
   (check-equal? ((viewer (compose)) 42) 42)                                        ; empty = identity
   (check-equal? ((setter (compose) 9) 42) 9)
 
-  ;; --- vref: single slot (bare focus) and the tuple (product) form, with the laws ---
-  (check-equal? ((viewer (vref 1)) (vector 'a 'b 'c)) 'b)
-  (check-equal? ((setter (vref 1) 'x) (vector 'a 'b 'c)) (vector 'a 'x 'c))
-  (check-equal? ((viewer (vref 0 2)) (vector 'a 'b 'c)) '(a c))
-  (check-equal? ((setter (vref 0 2) '(x y)) (vector 'a 'b 'c)) (vector 'x 'b 'y))
-  (check-equal? ((updater (vref 0 2) reverse) (vector 'a 'b 'c)) (vector 'c 'b 'a))
-  (check-equal? ((setter (vref 0 2) ((viewer (vref 0 2)) (vector 'a 'b 'c))) (vector 'a 'b 'c))
-                (vector 'a 'b 'c))                                                    ; get-put
-  (check-equal? ((viewer (vref 0 2)) ((setter (vref 0 2) '(x y)) (vector 'a 'b 'c)))
-                '(x y)))                                                              ; put-get
+  ;; --- list-of (one list focus), lref (fan-out to N foci), varg (rearrange by position) ---
+  (define (vlist l . s) (call-with-values (lambda () (apply (viewer l) s)) list))  ; collect viewer's values
+  (define li (list-of car (lambda (x) (cons x 'g))))               ; (x . g) <-> x, over a list
+  (define gl (list (cons 1 'g) (cons 2 'g) (cons 3 'g)))
+  (check-equal? (vlist li gl) (list '(1 2 3)))                      ; list-of is ONE focus: the list
+  (check-equal? ((setter li (list 10 20 30)) gl)
+                (list (cons 10 'g) (cons 20 'g) (cons 30 'g)))
+  (define L (compose li (lref 0 2)))
+  (check-equal? (vlist L gl) '(1 3))                               ; lref fans to N foci
+  (check-equal? ((setter L 'X 'Y) gl) (list (cons 'X 'g) (cons 2 'g) (cons 'Y 'g)))
+  (check-equal? ((updater L add1 add1) gl) (list (cons 2 'g) (cons 2 'g) (cons 4 'g)))
+  (check-equal? (length ((setter L 'X) gl)) 3)                     ; under-supplied: length preserved
+  (check-equal? (vlist L ((setter L 'X 'Y) gl)) '(X Y))            ; put-get
+  (check-equal? (vlist (compose li (lref 0 1 2) (varg 2 0)) gl) '(3 1))            ; varg reorders
+  (check-equal? (vlist (compose li (lref 0 1 2) (varg 2 0)) gl)
+                (call-with-values (lambda () ((arg 2 0) 1 2 3)) list)))            ; viewer of varg = arg
