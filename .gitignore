@@ -3,3 +3,6 @@ compiled/
 
 # Generated Scribble HTML renders (regenerated from the .scrbl source)
 scribl/doc-html/
+
+# Scratch / exploration probes (throwaway; not part of the build)
+scratch/
