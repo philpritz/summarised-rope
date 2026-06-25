@@ -31,8 +31,9 @@
          check-iso-laws          ; (check-iso-laws i xs): the inputs that don't
          make-lens               ; (make-lens peek): a coalgebra peek -> a variadic van Laarhoven lens
          viewer setter updater   ; the lens ops, curried -- viewer a getter (foci as values), setter/updater commands
-         list-of                 ; (list-of view set): map a per-element lens over a list -- ONE focus (the list)
+         list-of                 ; (list-of el): map a single-focus element lens over a list -- ONE focus (the list of views)
          lref                    ; (lref i ...): index a list, fanning to N foci; length-safe
+         ldiag                   ; (ldiag i): the list diagonal -- view position i (the bias), put broadcasts to all
          varg                    ; (varg i ...): rearrange the value stream by position -- the lens twin of `arg`
          on                      ; (on op f): op on its args, each projected through f
          arg                     ; ((arg i ...) . xs): selected args as values (0-based projection / K)
@@ -95,10 +96,13 @@
 (define ((setter  l . xs) . s) (apply (l (lambda _    (apply values xs))) s))
 (define ((updater l . fs) . s) (apply (l (lambda foci (apply values (map (lambda (f x) (f x)) fs foci)))) s))
 
-;; `list-of`: a per-element (view, set) lifted over a list -- a SINGLE focus, the list of views.
+;; `list-of`: a single-focus element LENS lifted over a list -- a SINGLE focus, the list of element
+;; views; the put rebuilds element-wise via the element lens's setter (a partial element update is kept).
 ;; Keeps the chain single-value; `lref` below is where it fans out.
-(define (list-of view set)
-  (make-lens (lambda (xs) (values (lambda (ys) (map set ys)) (map view xs)))))
+(define (list-of el)
+  (make-lens (lambda (xs)
+    (values (lambda (ys) (map (lambda (x y) ((setter el y) x)) xs ys))
+            (map (viewer el) xs)))))
 
 ;; `lref`: index a list at positions `is`, fanning the focus into N values (the picked elements);
 ;; the put writes them back into a copy.  Length-safe -- it overwrites slots, never reshapes.
@@ -110,6 +114,11 @@
                       (for ([i (in-list is)] [x (in-list nf)]) (vector-set! w i x))
                       (vector->list w))
            (map (lambda (i) (vector-ref v i)) is)))))
+
+;; `ldiag`: the diagonal of a list -- view position `i` (the bias); the put broadcasts one value to
+;; every slot.  The gap-collapsing twin of `(lref i)` (lawful only when the slots are already equal).
+(define (ldiag i)
+  (make-lens (lambda (xs) (values (lambda (x) (make-list (length xs) x)) (list-ref xs i)))))
 
 ;; `varg`: the lens twin of `arg` -- focus the values at positions `is`, in that order; the put
 ;; writes them back.  ((viewer (varg . is)) ...) = ((arg . is) ...).  Lawful for distinct positions
@@ -335,7 +344,7 @@
 
   ;; --- list-of (one list focus), lref (fan-out to N foci), varg (rearrange by position) ---
   (define (vlist l . s) (call-with-values (lambda () (apply (viewer l) s)) list))  ; collect viewer's values
-  (define li (list-of car (lambda (x) (cons x 'g))))               ; (x . g) <-> x, over a list
+  (define li (list-of (make-lens (lambda (p) (values (lambda (x) (cons x (cdr p))) (car p))))))  ; car-lens over a list
   (define gl (list (cons 1 'g) (cons 2 'g) (cons 3 'g)))
   (check-equal? (vlist li gl) (list '(1 2 3)))                      ; list-of is ONE focus: the list
   (check-equal? ((setter li (list 10 20 30)) gl)
@@ -348,4 +357,10 @@
   (check-equal? (vlist L ((setter L 'X 'Y) gl)) '(X Y))            ; put-get
   (check-equal? (vlist (compose li (lref 0 1 2) (varg 2 0)) gl) '(3 1))            ; varg reorders
   (check-equal? (vlist (compose li (lref 0 1 2) (varg 2 0)) gl)
-                (call-with-values (lambda () ((arg 2 0) 1 2 3)) list)))            ; viewer of varg = arg
+                (call-with-values (lambda () ((arg 2 0) 1 2 3)) list))            ; viewer of varg = arg
+
+  ;; ldiag: view position i (the bias), the put broadcasts one value to every slot
+  (check-equal? ((viewer (ldiag 0)) '(a b c)) 'a)
+  (check-equal? ((viewer (ldiag 1)) '(a b c)) 'b)
+  (check-equal? ((setter (ldiag 0) 'X) '(a b c)) '(X X X))
+  (check-equal? ((updater (ldiag 1) symbol->string) '(a b c)) '("b" "b" "b")))

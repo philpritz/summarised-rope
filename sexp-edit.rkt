@@ -39,7 +39,7 @@
          edge-contexts anchors edge-modulus
          re-anchor cover        ; the anchor flip as a cursor operation
          edge-guide edge-index  ; lenses onto one cursor edge (its guide / its index)
-         at move each both slot  ; edit verbs: zipper -> zipper commands (ride `idxs`)
+         at move edge each both slot  ; edit verbs: zipper -> zipper commands (ride `idxs`)
          (all-from-out "rope-core.rkt")
          (all-from-out "summaries/sexp-summary.rkt")
          (all-from-out "summaries/summaries.rkt")
@@ -71,7 +71,7 @@
 ;; component of the index picks its own side, split by `back-component?` at the
 ;; half-step gap -- front >= -1/2, back <= -1, leans included), AND readable as
 ;; the index, so the edit verbs reach the indices through `idxs` (zipper-guide ->
-;; list-of -> lref) without re-deriving from the zipper.
+;; list-of) without re-deriving from the zipper.
 (struct guide (index proc) #:property prop:procedure (struct-field-index proc))
 (define (slot-guide ix)
   (guide ix (lambda (L R)
@@ -146,22 +146,27 @@
 (define (cover z) (re-anchor z 1 'back))
 
 ;; ---------- command vocabulary ----------
-;; The cursor verbs ride ONE lens, `idxs`, from the zipper straight onto both edge indices:
-;;   zipper-guide (the guide list) -> (list-of guide-index slot-guide) (the index list) -> (lref 0 1)
-;;   (fan to the two indices).  Each verb is a zipper -> zipper command that applies its ops to the
-;;   two index foci in a SINGLE put, so the whole edit re-navigates once:
-;;     at   -- set both edges (a gap);   move -- one fn over both (an equal fn keeps a gap a gap);
-;;     each -- a fn per edge;            both -- the same fn over both (= (each f f) = (move f)).
+;; STYLE -- inline the lenses; don't bind intermediates.  An ad-hoc edit threads the zipper through
+;; the composed lens in place rather than naming each step or chaining z0/z1/z2; `idxs` and the verbs
+;; are the only standing shorthands, and everything else inlines into one `setter`/`updater` that
+;; re-navigates once.
+;; The cursor verbs ride `idxs` (zipper-guide -> (list-of index-of) -> the index list), then choose a
+;; reach with a selector lens at the tail: `(ldiag i)` collapses to position i (the gap verbs), `(lref
+;; i)` singles one edge out, NO selector keeps the whole list (the seg verbs).  Each is a zipper ->
+;; zipper command rebuilding in a SINGLE put, re-navigating once:
+;;     at   -- gap at ix (ldiag);        move -- gap, f on the basis (ldiag);
+;;     edge -- one edge i (lref);        each / both -- a fn per edge / one fn over both, on the list.
 ;; `slot` is the index-level helper: map the innermost slot, the frame (cdr) untouched, so each edge
 ;; stays in its own sexp.  (`chain`, the trace pipe, lives in zipper-core's `internal` submodule.)
-(define idxs (compose zipper-guide (list-of guide-index slot-guide) (lref 0 1)))  ; zipper <-> ix0, ix1
+(define idxs (compose zipper-guide (list-of index-of)))  ; zipper <-> (list ix0 ix1)
 
 (define ((slot h) ix) (cons (h (car ix)) (cdr ix)))
 
-(define (at   ix)    (setter  idxs ix ix))   ; absolute gap at ix
-(define (move f)     (updater idxs f  f))    ; gap at (f start) -- equal fn keeps a gap a gap
-(define (each fl fr) (updater idxs fl fr))   ; each edge its own fn
-(define (both f)     (updater idxs f  f))    ; same fn over both edges
+(define (at   ix)    (setter  (compose idxs (ldiag 0)) ix))                                    ; absolute gap at ix
+(define (move f)     (updater (compose idxs (ldiag 0)) f))                                     ; gap, f on the basis
+(define (edge i f)   (updater (compose idxs (lref i)) f))                                      ; one edge (0 start, 1 end)
+(define (each fl fr) (updater idxs (lambda (xs) (map (lambda (g x) (g x)) (list fl fr) xs))))  ; a fn per edge
+(define (both f)     (updater idxs (lambda (xs) (map f xs))))                                  ; same fn over both
 
 ;; ============================================================================
 ;; Tree generators -- in their own submodule, so they import without dragging in
@@ -349,7 +354,8 @@
     (check-equal? (doc ((setter zipper-focus "xx ") ((move (slot add1)) z)))  ; advance one slot
                   "(aa bb xx cc)")
     (check-equal? (~a ((viewer zipper-focus) ((each values (slot add1)) z)))  ; open gap -> seg
-                  "bb "))
+                  "bb ")
+    (check-equal? (~a ((viewer zipper-focus) ((edge 1 (slot add1)) z))) "bb ")) ; one edge: end +1 = same seg
   (let ([z (cursor rope '(1 0) '(2 0))])           ; a seg [bb, cc) = "bb "
     (check-equal? (~a ((viewer zipper-focus) ((both (slot add1)) z))) "cc"))    ; shift both edges
 
