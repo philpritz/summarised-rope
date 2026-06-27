@@ -12,14 +12,16 @@
          expt-iso                ; integer powers of an iso (scmutils function arithmetic)
          iso-law? check-iso-laws ; round-trip predicate; the inputs that fail it
          make-lens               ; (make-lens peek): a coalgebra -> a variadic lens
-         viewer setter updater   ; the lens ops, curried (viewer gets; setter/updater command)
+         viewer setter updater   ; the lens ops, curried (viewer gets, optional k folds the view; setter/updater command)
          list-of                 ; map an element lens over a list -- ONE focus
          lref                    ; index a list, fanning to N foci; length-safe
          ldiag                   ; the list diagonal -- view i, put broadcasts to all
          varg                    ; rearrange the value stream by position
+         vdiag                   ; the value-stream diagonal -- view i, put broadcasts to all (ldiag on values)
          on                      ; (on op f) a ... = (op (f a) ...) -- Haskell's `on`
          arg                     ; project args by 0-based position
          pass                    ; apply each f to the fixed args, as values
+         fork                    ; apply each f to the same arg(s), as values -- pass, functions-first
          spread                  ; apply each fn to its own arg, combine with h
          variadic                ; lift a binary op + seed to a variadic left fold
          fixed                   ; iterate to a fixed point
@@ -61,7 +63,7 @@
            (car r)                                             ; view -> lone const-box: skip the put
            (apply put r))))                                    ; set/over -> rebuild from new foci
    peek))
-(define ((viewer  l)      . s) (apply values (const-box-vs (apply (l (lambda foci (const-box foci))) s))))
+(define ((viewer  l [k values]) . s) (apply k (const-box-vs (apply (l (lambda foci (const-box foci))) s))))  ; optional k folds the view (optics `views`)
 (define ((setter  l . xs) . s) (apply (l (lambda _    (apply values xs))) s))
 (define ((updater l . fs) . s) (apply (l (lambda foci (apply values (map (lambda (f x) (f x)) fs foci)))) s))
 
@@ -100,6 +102,14 @@
                       (apply values (vector->list w)))
            (map (lambda (i) (vector-ref v i)) is)))))
 
+;; vdiag: the value-stream diagonal -- view value `i`, the put broadcasts one value to every
+;; position. The value-stream twin of `ldiag` (and the collapsing twin of `varg`); lawful only
+;; when the positions are already equal.
+(define (vdiag i)
+  (make-lens (lambda structvals
+    (values (lambda (x) (apply values (make-list (length structvals) x)))
+            (list-ref structvals i)))))
+
 ;; on: (on op f) a b ... = (op (f a) (f b) ...) -- the n-ary Haskell `on`. E.g.
 ;; (on guide smr) reads each side of a guide through a summary.
 (define ((on op f) . args) (apply op (map f args)))
@@ -112,6 +122,12 @@
 ;; pass: hold a tuple of args, then apply each function to them, as values --
 ;; ((pass . args) f g ...) = (values (apply f args) (apply g args) ...).
 (define ((pass . args) . fs)
+  (apply values (map (lambda (f) (apply f args)) fs)))
+
+;; fork: the function-first twin of `pass` -- hold the functions, then apply each to the same
+;; args, as values: ((fork f g ...) . args) = (values (apply f args) (apply g args) ...). A fanout;
+;; ((fork f g) x) = (values (f x) (g x)), e.g. (fork read values) reads and passes its arg through.
+(define ((fork . fs) . args)
   (apply values (map (lambda (f) (apply f args)) fs)))
 
 ;; spread: each function to its corresponding argument, results combined by `h` --
@@ -226,6 +242,15 @@
                  (lambda () ((pass 3 4) + * -)) list)
                 '(7 12 -1))                         ; each f applied to (3 4), as values
 
+  ;; --- fork: the function-first twin -- each fn to the same arg(s), as values ---
+  (check-equal? ((fork add1) 5) 6)                 ; one function, one arg
+  (check-equal? (call-with-values
+                 (lambda () ((fork + * -) 3 4)) list)
+                '(7 12 -1))                         ; each f applied to (3 4)
+  (check-equal? (call-with-values
+                 (lambda () ((fork add1 values) 5)) list)
+                '(6 5))                             ; fanout: read + pass-through (values = identity)
+
   ;; --- spread: spread-combine -- each function to its own argument, results combined
   ;;     by h.  (spread h f g) a b = (h (f a) (g b)).  Small arities inlined, 5+ tail. ---
   (check-equal? ((spread list add1 sub1) 10 20) '(11 19))               ; (list (add1 10) (sub1 20))
@@ -265,6 +290,7 @@
   (define fst-lens                          ; a lens onto a list's head (one focus)
     (make-lens (lambda (xs) (values (lambda (x) (cons x (cdr xs))) (first xs)))))
   (check-equal? ((viewer fst-lens) '(1 2 3)) 1)
+  (check-equal? ((viewer fst-lens add1) '(1 2 3)) 2)                               ; optional k folds the view: (add1 1)
   (check-equal? ((setter fst-lens 9) '(1 2 3)) '(9 2 3))
   (check-equal? ((updater fst-lens add1) '(1 2 3)) '(2 2 3))
   (check-equal? ((setter fst-lens ((viewer fst-lens) '(1 2))) '(1 2)) '(1 2))      ; get-put
@@ -299,4 +325,11 @@
   (check-equal? ((viewer (ldiag 0)) '(a b c)) 'a)
   (check-equal? ((viewer (ldiag 1)) '(a b c)) 'b)
   (check-equal? ((setter (ldiag 0) 'X) '(a b c)) '(X X X))
-  (check-equal? ((updater (ldiag 1) symbol->string) '(a b c)) '("b" "b" "b")))
+  (check-equal? ((updater (ldiag 1) symbol->string) '(a b c)) '("b" "b" "b"))
+
+  ;; vdiag: ldiag on the value stream -- view value i, the put broadcasts to every position
+  (check-equal? ((viewer (vdiag 0)) 'a 'b 'c) 'a)
+  (check-equal? ((viewer (vdiag 1)) 'a 'b 'c) 'b)
+  (check-equal? (call-with-values (lambda () ((setter (vdiag 0) 'X) 'a 'b 'c)) list) '(X X X))
+  (check-equal? (call-with-values (lambda () ((updater (vdiag 1) symbol->string) 'a 'b 'c)) list)
+                '("b" "b" "b")))

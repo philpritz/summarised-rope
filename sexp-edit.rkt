@@ -7,8 +7,10 @@
 ;; spines (`spine-cmp`); everything else is zipper-core. The surface:
 ;;   spine-cmp        front back index -> -1 | 0 | 1   -- the comparison (one guide's verdict)
 ;;   slot-guide       index -> guide   -- a guide that also reads back as its index
+;;   cut-index        L R -> index     -- read an index straight off a cut (front anchor)
 ;;   modulus + base-left/base-right/flip  -- re-basing one index's head between its two anchors
-;;   cursor sexp-guides anchors re-anchor cover  -- place / re-anchor a cursor
+;;   cursor sexp-guides anchors re-anchor cover   -- place / re-anchor a cursor
+;;   reguide front-guide back-guide               -- (reguide gl gr): set each edge's guide from its cut (L R -> guide)
 ;;   edge-guide edge-index                       -- lenses onto one cursor edge
 ;;   at move edge each both                      -- edit verbs: zipper -> zipper commands
 ;; Index model, the two anchors, the lexicographic comparison, and the lens style:
@@ -23,12 +25,15 @@
 
 (provide spine-cmp              ; (spine-cmp front back index) -> -1 | 0 | 1
          slot-guide guide-index ; (slot-guide index) -> guide (carries its index)
+         cut-index              ; (cut-index L R) -> front index, read off a cut's sides (no guide)
          modulus base-left base-right flip  ; re-basing: head-only, by one modulus
          sexp-guides cursor     ; cursor conveniences over zipper-core
          edge-contexts anchors edge-modulus
          re-anchor cover        ; the anchor flip as a cursor operation
+         reguide                ; (reguide gl gr): set each edge's guide from its cut
+         front-guide back-guide ; L R -> guide at an anchor (reguide's makers)
          edge-guide edge-index  ; lenses onto one cursor edge (its guide / its index)
-         at move edge each both slot  ; edit verbs: zipper -> zipper commands (ride `idxs`)
+         slot                         ; innermost-slot wrapper (verbs at/move/edge/each/both commented out -- values exploration)
          (all-from-out "rope-core.rkt")
          (all-from-out "summaries/sexp-summary.rkt")
          (all-from-out "summaries/summaries.rkt")
@@ -59,6 +64,13 @@
   (guide ix (lambda (L R)
               (let-values ([(front back) ((on sand-spines sexp-smr) L R)])
                 (spine-cmp front back ix)))))
+
+;; cut-index: read a sexp index straight off a cut's sides L R -- the front anchor, no guide. View
+;; through the edge-sides lens and pass this as the viewer continuation. (sand-spines also yields the
+;; back anchor, which `anchors` pairs with the front; reading the front only, this drops the front/back choice.)
+(define (cut-index L R)
+  (define-values (front back) ((on sand-spines sexp-smr) L R))
+  front)
 
 ;; ---------- cursor conveniences ----------
 (define (sexp-guides s [e s]) (list (slot-guide s) (slot-guide e)))   ; the guide list (gs ge)
@@ -113,6 +125,24 @@
   (define g (slot-guide (if (eq? side 'front) front back)))
   ((setter (edge-guide i) g) z))
 
+;; reguide: install a guide at each cursor edge, computed from that edge's cut (its L R).
+;;   gl, gr : L R -> guide   -- the start edge's maker, the end edge's maker.
+;; The covering pair is (reguide front-guide back-guide): the start stays front-anchored, the end
+;; flips to its back anchor. front-guide is slot-guide on the front anchor (cut-index); back-guide
+;; takes the back-headed anchor off the same spines.
+(define front-guide (compose slot-guide cut-index))   ; ((compose ..) L R) = (slot-guide (cut-index L R))
+(define (back-guide L R)
+  (define-values (f b) ((on sand-spines sexp-smr) L R))
+  (slot-guide (cons (car b) (cdr f))))
+
+;; re-edge: one edge -- read its cut through the edge-sides lens (g is the viewer continuation,
+;; receiving L R) to make the guide, then install it at that edge.
+(define ((re-edge i g) z)
+  ((setter (edge-guide i) ((viewer (edge-sides i) g) z)) z))   ; read the cut -> guide, install at edge i
+
+;; reguide: re-guide the start edge, then the end edge.
+(define (reguide gl gr) (compose (re-edge 1 gr) (re-edge 0 gl)))
+
 ;; cover: flip the end onto its right anchor (the start already reads the left), so
 ;; an edit between the edges touches neither anchor's side and the cursor keeps covering.
 (define (cover z) (re-anchor z 1 'back))
@@ -126,11 +156,26 @@
 
 (define ((slot h) ix) (cons (h (car ix)) (cdr ix)))      ; map the innermost slot; frame (cdr) untouched
 
-(define (at   ix)    (setter  (compose idxs (ldiag 0)) ix))                                    ; absolute gap at ix
-(define (move f)     (updater (compose idxs (ldiag 0)) f))                                     ; gap, f on the basis
-(define (edge i f)   (updater (compose idxs (lref i)) f))                                      ; one edge (0 start, 1 end)
-(define (each fl fr) (updater idxs (lambda (xs) (map (lambda (g x) (g x)) (list fl fr) xs))))  ; a fn per edge
-(define (both f)     (updater idxs (lambda (xs) (map f xs))))                                  ; same fn over both
+;; The list-based verbs are commented out -- exploring the values-based lenses (idxs fanned to
+;; values via lref, then vdiag / varg / lref selectors) in their place; see the scratch demo.
+#;(define (at   ix)    (setter  (compose idxs (ldiag 0)) ix))                                    ; absolute gap at ix
+#;(define (move f)     (updater (compose idxs (ldiag 0)) f))                                     ; gap, f on the basis
+#;(define (edge i f)   (updater (compose idxs (lref i)) f))                                      ; one edge (0 start, 1 end)
+#;(define (each fl fr) (updater idxs (lambda (xs) (map (lambda (g x) (g x)) (list fl fr) xs))))  ; a fn per edge
+#;(define (both f)     (updater idxs (lambda (xs) (map f xs))))                                  ; same fn over both
+
+;; ---------- a worked edit sequence (the format to follow when one is asked for) ----------
+;; Each verb spelled INLINE as setter/updater over `idxs` + a tail selector, the sugared verb named
+;; in the trailing comment, the marked document each step produces on the right. `chain` (from
+;; zipper-core's `internal` submodule) threads the commands and prints each step.
+;;
+;;   (chain (cursor rope '(1 0))                            ; (aa ‸bb cc)
+;;          (updater (compose idxs (ldiag 0)) (slot add1))  ; move (slot add1)  -> (aa bb ‸cc)
+;;          (setter  (compose idxs (ldiag 0)) '(1 0))       ; at '(1 0)          -> (aa ‸bb cc)
+;;          (updater (compose idxs (lref 1))  (slot add1))  ; edge 1 (slot add1) -> (aa ⟦bb ⟧cc)
+;;          (reguide front-guide back-guide)                ; cover              -> (aa ⟦bb ⟧cc)
+;;          (setter zipper-focus "XX ")                     ; replace the seg    -> (aa ⟦XX ⟧cc)
+;;          (setter zipper-focus ""))                       ; delete             -> (aa ‸cc)
 
 ;; ============================================================================
 ;; Tree generators -- in their own submodule, so they import without dragging in
@@ -243,6 +288,13 @@
     (check-equal? (cuts rope1 front) (cons "(aa " "xx bb cc)"))  ; left-anchored: stays by aa
     (check-equal? (cuts rope1 back)  (cons "(aa xx " "bb cc)"))) ; right-anchored: stays by bb
 
+  ;; --- cut-index: read the front index straight off an edge's sides via the viewer continuation
+  ;; (the edge-sides lens), no guide-index -- agrees with anchors' front ---
+  (let*-values ([(z) (cursor rope ^bb)]
+                [(front back) (anchors z 0)])
+    (check-equal? ((viewer (edge-sides 0) cut-index) z) ^bb)
+    (check-equal? ((viewer (edge-sides 0) cut-index) z) front))
+
   ;; --- re-basing: every cut (incl. mid-atom ½s, whitespace, and the -1/2 head
   ;; after an open paren) -- the modulus is integral, head-basing reproduces the
   ;; anchor pair, flip is an involution ---
@@ -310,9 +362,15 @@
     (check-equal? (~a ((viewer zipper-focus) z)) "bb ")
     (check-equal? (doc ((setter zipper-focus "b1 (b2 b3) ") z)) "(aa b1 (b2 b3) cc)"))
 
-  ;; --- the edit verbs: each is a zipper -> zipper command (rides `idxs`), reading the index
-  ;; straight off the guide.  (indexes in "(aa bb cc)": ^bb = '(1 0), ^cc = '(2 0), end slot = '(3 0))
-  (let ([z (cursor rope '(1 0))])                  ; a gap before bb
+  ;; reguide is parameterised per edge: a maker pair sets each edge's guide from its cut.
+  ;; (reguide front-guide back-guide) reproduces cover; front on both keeps the seg front-anchored.
+  (let ([z ((reguide front-guide back-guide) (cursor rope ^bb ^cc))])
+    (check-equal? (doc ((setter zipper-focus "b1 (b2 b3) ") z)) "(aa b1 (b2 b3) cc)"))  ; == cover
+  (let ([z ((reguide front-guide front-guide) (cursor rope ^bb ^cc))])
+    (check-equal? (~a ((viewer zipper-focus) z)) "bb "))
+
+  ;; --- the edit verbs are commented out (values-based exploration); their tests too ---
+  #;(let ([z (cursor rope '(1 0))])                  ; a gap before bb
     (check-equal? (doc ((setter zipper-focus "xx ") ((at '(2 0)) z)))         ; absolute
                   "(aa bb xx cc)")
     (check-equal? (doc ((setter zipper-focus "xx ") ((move (slot add1)) z)))  ; advance one slot
@@ -320,7 +378,7 @@
     (check-equal? (~a ((viewer zipper-focus) ((each values (slot add1)) z)))  ; open gap -> seg
                   "bb ")
     (check-equal? (~a ((viewer zipper-focus) ((edge 1 (slot add1)) z))) "bb ")) ; one edge: end +1 = same seg
-  (let ([z (cursor rope '(1 0) '(2 0))])           ; a seg [bb, cc) = "bb "
+  #;(let ([z (cursor rope '(1 0) '(2 0))])           ; a seg [bb, cc) = "bb "
     (check-equal? (~a ((viewer zipper-focus) ((both (slot add1)) z))) "cc"))    ; shift both edges
 
   ;; ========================================================================

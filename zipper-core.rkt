@@ -6,6 +6,7 @@
 ;;   zipper-guide  lens onto the cursor as the list (gs ge)  -- moving both edges
 ;;   zipper-edge   (zipper-edge i): lens onto edge i (0 = start, 1 = end) -- moving one
 ;;   zipper-focus  lens onto the focus rope                  -- editing the content
+;;   edge-sides    (edge-sides i): lens onto edge i's summary cut as two foci L R, off a zipper
 ;;   to-root       fold the crumbs back -- the focus becomes the whole document
 ;;   on-edges      read the two edges as cuts, spread and combine
 ;; viewer/setter/updater (helper-algebras) drive the lenses; re-exported for callers.
@@ -23,6 +24,7 @@
   [zipper-guide lens/c]
   [zipper-edge  (-> (or/c 0 1) lens/c)]
   [zipper-focus lens/c]
+  [edge-sides   (-> (or/c 0 1) lens/c)]
   [on-edges     (-> binop/c binop/c binop/c (-> zipper? any))])
  viewer setter updater)                ; the lens ops (helper-algebras), re-exported for callers
 
@@ -99,7 +101,8 @@
 
 ;; ---------- the public surface ----------
 
-(struct zipper (smr gs ge head stack) #:transparent       ; fixed leads -- reseal is (curry zipper smr gs ge)
+(struct zipper (smr gs ge hd stack) #:transparent         ; fixed leads -- reseal is (curry zipper smr gs ge)
+                                                          ; field `hd` (not `head`): frees zipper-head for the head lens
   #:property prop:custom-write (lambda (z port mode) (zipper-show z port)))
 
 ;; contracts -- defined here, below the struct, because they mention zipper?.
@@ -140,12 +143,43 @@
                  (values (lambda (g) ((zipper-lift) (zipper smr g  ge h k))) gs)
                  (values (lambda (g) ((zipper-lift) (zipper smr gs g  h k))) ge)))))
 
-;; zipper-focus: zipper-guide's twin, the lens onto the focus rope; the put swaps in content
-;; (make-rope coerces) and re-navigates.  delete = (setter zipper-focus "").
-(define zipper-focus
+;; zipper-head: the lens onto the machine head (before . focus . after). The put reinstalls the
+;; head and re-navigates, coercing the focus field (make-rope) so a raw-content head re-enters the
+;; machine as a rope -- the head-installation boundary, where every write lands and navigates. A
+;; bare head carries no smr, so the coercion lives here (smr in scope), not in head-focus.
+(define zipper-head
   (make-lens (lambda (z)
-             (match-define (zipper smr gs ge (head b t a) k) z)
-             (values (lambda (c) ((zipper-lift) (zipper smr gs ge (head b ((make-rope smr) c) a) k))) t))))
+             (match-define (zipper smr gs ge h k) z)
+             (values (lambda (h*)
+                       (match-define (head b t a) h*)
+                       ((zipper-lift) (zipper smr gs ge (head b ((make-rope smr) t) a) k)))
+                     h))))
+
+;; head-focus: the lens onto a head's focus rope -- the middle of (before . focus . after); the put
+;; swaps the field, leaving the flanking summaries. Coercion + navigation are zipper-head's job.
+(define head-focus
+  (make-lens (lambda (h)
+             (match-define (head b t a) h)
+             (values (lambda (t*) (head b t* a)) t))))
+
+;; zipper-focus: zipper-guide's twin, the lens onto the focus rope -- the head lens composed with
+;; the head's focus lens. The put swaps in content (make-rope coerces) and re-navigates.
+;; delete = (setter zipper-focus "").
+(define zipper-focus (compose zipper-head head-focus))
+
+;; edge-sides: lens onto edge i's summary cut as two foci L R, read straight off a zipper -- smr
+;; taken from the zipper, the focus folded into the far side (start: before | focus·after; end:
+;; before·focus | after). The put writes a GAP at the cut and re-navigates (through zipper-head).
+;; Consume via the viewer continuation (k receives L R), e.g. cut-index or list.
+(define (edge-sides i)
+  (make-lens
+   (lambda (z)
+     (match-define (zipper smr _ _ (head b m a) _) z)
+     (define mt ((make-rope smr) ""))
+     (define (put L R) ((setter zipper-head (head L mt R)) z))   ; gap at the cut, re-navigated
+     (if (zero? i)
+         (values put b         (smr m a))                        ; start edge: foci L R
+         (values put (smr b m) a)))))                            ; end edge:   foci L R
 
 ;; to-root: fold every crumb back into the head -- the focus becomes the whole document.
 ;; Outside the lift: homing must not navigate back down; the guides survive.
@@ -220,6 +254,16 @@
   (let* ([z  ((setter zipper-guide (seg 0 5)) z0)]
          [z* ((setter (zipper-edge 1) (at 11)) z)])           ; move just the end edge to 11
     (check-equal? (~a ((viewer zipper-focus) z*)) "hello world"))
+
+  ;; edge-sides reads edge i's cut as two foci L R straight off the zipper, and the viewer
+  ;; continuation receives them (k = list collects, a 2-arg k picks). (zipper-head still drives it,
+  ;; internally -- not exported.)
+  (let ([z ((setter zipper-guide (seg 0 5)) z0)])             ; focus "hello", before "", after " world"
+    (check-equal? (~a (head-rope ((viewer zipper-head) z))) "hello")          ; zipper-head: internal, white-box
+    (check-equal? ((viewer (edge-sides 0) list) z) '(0 11))   ; start: 0 | "hello world"
+    (check-equal? ((viewer (edge-sides 1) list) z) '(5 6))    ; end:   "hello" | "world"
+    (check-equal? ((viewer (edge-sides 0) (lambda (L R) L)) z) 0)             ; k receives L R -> L
+    (check-equal? ((viewer (edge-sides 1) (lambda (L R) R)) z) 6))
 
   (let ([z ((setter zipper-guide (seg 6 11)) z0)])
     (check-equal? (~a ((viewer zipper-focus) z)) "world")
