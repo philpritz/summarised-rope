@@ -98,6 +98,37 @@
 ;; different object and misses the slot.
 (define buffer-smr (bundle sexp-smr char-smr word-smr linecol-smr))
 
+;; ========== EXPERIMENTAL: a guide* over linecol -- split after every newline ==========
+;; Provisional, opt-in: (require (submod "summaries.rkt" experimental)). The concrete
+;; instance for rope-core's experimental multisect*. Context-free, so bs/as go unused.
+;; Self-contained -- delete this submodule to retract.
+(module+ experimental
+  (require (submod "../rope-core.rkt" experimental))
+  (provide newline-guide*)
+
+  (define (ends-nl?   v) (and (> (linecol-lines v) 0) (zero? (linecol-cols v))))  ; ends at a newline
+  (define (inner-cuts v) (- (linecol-lines v) (if (ends-nl? v) 1 0)))             ; newlines not at the end
+
+  (define newline-guide*
+    (make-guide* linecol-smr
+      (lambda (bs fsl fsr as)
+        (values (> (inner-cuts fsl) 0)   ; left?  -- a cut inside the left child
+                (ends-nl? fsl)            ; mid?   -- seam sits right after a newline
+                (> (inner-cuts fsr) 0))))); right? -- a cut inside the right child
+
+  (module+ test
+    (require rackunit)
+    (define build (make-rope linecol-smr))
+    (define (lines s) (map (lambda (p) (format "~a" p)) ((multisect* newline-guide*) (build s))))
+    (check-equal? (lines "a\nb\nc")    '("a\n" "b\n" "c"))
+    (check-equal? (lines "abc")        '("abc"))
+    (check-equal? (lines "a\n")        '("a\n"))            ; trailing newline -> no empty final piece
+    (check-equal? (lines "\nabc")      '("\n" "abc"))
+    (check-equal? (lines "x\ny z\nw\n")'("x\n" "y z\n" "w\n"))
+    ;; a branched rope (> max-leaf), so the prune path runs
+    (check-equal? (lines (string-append (make-string 40 #\a) "\n" (make-string 40 #\b)))
+                  (list (string-append (make-string 40 #\a) "\n") (make-string 40 #\b)))))
+
 (module+ test
   (require rackunit)
 

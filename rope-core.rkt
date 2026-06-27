@@ -176,6 +176,61 @@
     (if (pathological? t) (rebalance t) t))
   build)
 
+;; ========== EXPERIMENTAL: variable multisect (guide*) ==========================
+;; Provisional, opt-in: (require (submod "rope-core.rkt" experimental)). Where a guide
+;; names one cut, a guide* reports cuts across a region, so the piece count varies with
+;; the text (e.g. split at every newline). Self-contained -- delete this submodule to
+;; retract. It sees PART 1/2's privates (rope-split, rope-join, rope-summary) directly.
+(module+ experimental
+  (provide (struct-out guide*) make-guide* frame-guide* multisect*)
+
+  ;; queried with the two child summaries, answers (values left? mid? right?): a cut inside
+  ;; the left child, at the seam, inside the right child. bs/as are the outer context,
+  ;; stored by frame-guide* and re-folded as the walk descends.
+  (struct guide* (cmb bs as raw)
+    #:property prop:procedure
+    (lambda (d fsl fsr) ((guide*-raw d) (guide*-bs d) fsl fsr (guide*-as d))))
+
+  (define (make-guide* cmb raw) (guide* cmb (cmb) (cmb) raw))   ; (cmb) = the algebra's identity
+
+  (define (frame-guide* g bl ar)                                ; fold new context onto both sides
+    (struct-copy guide* g
+      [bs ((guide*-cmb g) (guide*-bs g) bl)]
+      [as ((guide*-cmb g) ar (guide*-as g))]))
+
+  (define (point? t) (and (leaf? t) (< (string-length (leaf-text t)) 2)))  ; no boundary inside
+
+  ;; walk t, harvesting every cut the guide* finds; prune subtrees with none. Tail-passing:
+  ;; push conses onto the running piece list, welding across a seam the guide* left uncut.
+  (define ((multisect* g0) t)
+    (define cmb (guide*-cmb g0))
+    (define (push t fuse? tail)
+      (if (and fuse? (pair? tail))
+          (cons (rope-join t (car tail)) (cdr tail))
+          (cons t tail)))
+    (let go ([t t] [g g0] [fuse? #f] [tail '()])
+      (if (point? t)
+          (push t fuse? tail)
+          (let*-values ([(l r)         (rope-split t)]
+                        [(fsl fsr)     (values (rope-summary l) (rope-summary r))]
+                        [(lft mid rgt) (g fsl fsr)])
+            (let ([tail (if rgt (go r (frame-guide* g fsl (cmb)) fuse? tail)
+                                (push r fuse? tail))])
+              (if lft (go l (frame-guide* g (cmb) fsr) (not mid) tail)
+                      (push l (not mid) tail)))))))
+
+  (module+ test
+    (require rackunit)
+    (define sum   (make-summary string-length +))
+    (define build (make-rope sum))
+    (define (texts ps) (map (lambda (p) (format "~a" p)) ps))
+    ;; mid? always fires -> a cut between every char; left?/right? = an interior boundary exists
+    (define cut-each (make-guide* sum (lambda (bs l m r) (values (> l 1) (> l 0) (> r 1)))))
+    (check-equal? (texts ((multisect* cut-each) (build "abcd"))) '("a" "b" "c" "d"))
+    ;; nothing fires -> the whole rope welds back to one piece
+    (define no-cut (make-guide* sum (lambda (bs l m r) (values #f #f #f))))
+    (check-equal? (texts ((multisect* no-cut) (build "abcd"))) '("abcd"))))
+
 (module+ test
   (require rackunit)
 
