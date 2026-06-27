@@ -1,94 +1,44 @@
 #lang racket
 
-;; The sexp summary instance: its monoid (`sexp-smr`, recognizing ( ) [ ] { } matched
-;; by kind) AND the navigation read interface `sand-spines`, which reads a cut as the
-;; front/back spines the sexp layer compares against (sexp-edit.rkt).  Two highlighting
-;; seeds follow it: a naive `str-smr` (a quote count) and `strsexp-smr`, which reuses
-;; the sexp algebra gated by string state so parens inside strings are discounted,
-;; producing index spines like `sand-spines` does.  Built on rope-core's `make-summary`;
-;; the general summary toolkit -- `bundle`, the plain-text metrics, and the `buffer-smr`
-;; product that combines this instance with them -- lives in summaries.rkt.
-;;
-;; Sexp summary: the opens/closes algebra as a SIGNED `sexp-val` struct, over the
-;; current rope-core (`make-summary`).  It recognizes ( ) [ ] { } matched STRICTLY by
-;; kind -- a closer closes only the INNERMOST open, and only if their shapes pair; a
-;; wrong-kind innermost is a clash that collapses the whole value to the absorbing
-;; 'malformed.  So a value is one of three: #f (empty/identity) | sexp-val | 'malformed.
-;; Three decisions shape the struct:
-;;
-;; SIGNED STACKS.  Each `opens` entry is (bracket . +(k+1)), each `closes` entry is
-;; (bracket . -(k+1)), so a value reads (sexp-val head (negatives) forms (positives)
-;; tail) and the slot indexes read DIRECTLY off the stack heads: front = the count at
-;; (car opens) of the before summary, back = the count at (car closes) of the after.
-;; No count is ever 0 (zero stays the frame's own boundary).  The offset IS storable
-;; once both stacks carry it symmetrically and the combine compensates -- the
-;; associativity battery below is the proof.
-;;
-;; COMPLETION COUNTING.  A frame counts on the enclosing level at its CLOSER (the pop
-;; bumps what it exposes), not at its opener.  Atoms still count at their first char.
-;; So an open frame's interior leads with the same value as the frame's own start
-;; slot -- a prefix extension of it -- instead of colliding with the NEXT sibling's
-;; start, and spine comparison is naively lexicographic (see sexp-edit.rkt).  Mirrored
-;; on the right: a dangling closer seeds the level above with the frame it closed
-;; (forms := 1), so `closes` entries count frames whose close is ahead.  Every
-;; completion is counted exactly once, by whichever side saw the closer: a leaf pop
-;; bumps; the merge's cancellation does NOT (the right chunk counted it).
-;;
-;; KIND-STRICT, MALFORMED-ABSORBING.  On well-formed input strict matching agrees with
-;; bracket-blind nesting, so a single kind (( ) only) can never clash and stays fully
-;; associative on ANY input; a multi-kind clash goes to 'malformed, and because that is
-;; absorbing the combine stays associative even on malformed fragments.
-;;
-;;   closes : dangling closers, innermost-first; entry = (bracket . -(k+1)), k = forms
-;;            preceding it at its level (atoms by start, frames by close).
-;;   forms  : complete forms at the current (innermost-open, or top) level.
-;;   opens  : open brackets, innermost-first; entry = (bracket . +(k+1)), k = children so far.
+;; Sexp summary: the s-expression structure cached at every rope node.
+;;   sexp-smr      ( ) [ ] { } matched by kind; value #f | sexp-val | 'malformed
+;;   malformed?    a bracket-kind clash collapsed the value
+;;   sand-spines   read a cut as front/back index spines (the nav interface)
+;;   str-smr       naive in-string seed: a raw quote count
+;;   strsexp-smr   sexp algebra gated by string state; strsexp-spines /
+;;                 strsexp-in-string? read its cuts
+;; Built on rope-core's `make-summary`; plain-text metrics and the `buffer-smr`
+;; product live in summaries.rkt. Narrative in scribble/sexp-summary.scrbl.
 
 (require racket/match
          "../rope-core.rkt")          ; make-summary
 
-(provide sexp-smr                  ; THE sexp summary -- ( ) [ ] { } matched by kind; 'malformed on a clash
-         malformed?                ; (malformed? v) -> #t if a bracket-kind clash collapsed the value
-         sand-spines               ; (sand-spines L R) -> (values front back): read a cut as spines
-         str-smr                   ; (str-smr str) -> quote count: the naive in-string seed
-         strsexp-smr               ; sexp algebra gated by string state (parens in strings discounted)
-         strsexp-spines            ; (strsexp-spines L R) -> spines, gated by the left's string parity
-         strsexp-in-string?)       ; (strsexp-in-string? L) -> in a string at the cut after L?
+(provide sexp-smr malformed?
+         sand-spines               ; (L R) -> (values front back)
+         str-smr strsexp-smr
+         strsexp-spines strsexp-in-string?)
 
 ;; ---------- the summary value ----------
-;; Three states: #f is the empty/identity (= (sexp-smr "")); 'malformed is the
-;; absorbing clash -- a closer meeting a wrong-kind innermost open, anywhere in the
-;; document; otherwise a `sexp-val`.  head/tail flank the three measure fields, so a
-;; value reads left-to-right like the fragment itself.  opens/closes entries are
-;; (bracket . count): opens +(k+1), closes -(k+1), innermost-first.
+;; head/tail flank three measure fields; the stacks are signed (opens +(k+1),
+;; closes -(k+1)) so a slot index reads off a stack head. Why signed: scribble.
 (struct sexp-val
-  (head             ; class of the first char: 'open | 'close | 'ws | 'atom
-   closes           ; dangling closers, innermost-first; entries (bracket . -(k+1))
-   forms            ; complete forms at the current level (a plain count)
-   opens            ; open brackets, innermost-first; entries (bracket . +(k+1))
-   tail)            ; class of the last char:  'open | 'close | 'ws | 'atom
+  (head             ; first char's class: 'open | 'close | 'ws | 'atom
+   closes           ; dangling closers, innermost-first; (bracket . -(k+1))
+   forms            ; complete forms at the current level
+   opens            ; open brackets, innermost-first; (bracket . +(k+1))
+   tail)            ; last char's class
   #:transparent)
 (define (malformed? v) (eq? v 'malformed))
 
-;; ---------- brackets: the alphabet ----------
-;; The one source of truth -- each opener paired with its closer.  open?/close? and
-;; `matching` derive from it, as does the tokenizer's bracket char-class.  Matching is
-;; kind-strict: a closer closes only the innermost open of its own shape.
+;; ---------- brackets ----------
 (define brackets '((#\( . #\)) (#\[ . #\]) (#\{ . #\})))
 (define (open?  c) (and (assv c brackets) #t))
 (define (close? c) (and (memv c (map cdr brackets)) #t))
-(define (matching o c) (eqv? (cdr (assv o brackets)) c))   ; does closer c close opener o?
+(define (matching o c) (eqv? (cdr (assv o brackets)) c))
 
 ;; ---------- from-string ----------
-;; Tokenize into brackets and maximal atom runs (whitespace falls away), then fold
-;; the signed completion-counting algebra, kind-strict:
-;;   open   pushes a fresh frame, (bracket . +1);
-;;   atom   registers one form at the current level (`go`);
-;;   close  if the innermost open matches by kind, pops it and registers the frame
-;;          one level up (`go` on the popped stack); a DANGLING closer (nothing open)
-;;          seeds a fresh base level (forms := 1) and emits (bracket . -(forms+1));
-;;          a wrong-kind innermost open is a clash -> 'malformed.
-;; head/tail are the first/last char's class.  #f stays the empty/identity.
+;; Fold the signed completion-counting algebra over the tokens, kind-strict (per-case
+;; labels below). Why a frame counts at its closer, not its opener: scribble.
 (define (sexp-leaf s)
   (define (tokens str)                          ; first char of each bracket / atom run
     (for/list ([t (in-list (regexp-match* #px"[][(){}]|[^][(){}\\s]+" str))]) (string-ref t 0)))
@@ -100,25 +50,21 @@
            ['() (sexp-val (class (string-ref s 0)) (reverse closes) forms opens
                           (class (string-ref s (sub1 (string-length s)))))]
            [(cons c rest)
-            (define (go stack)                  ; a form completes at `stack`'s top; continue
+            (define (go stack)                  ; a form completes at `stack`'s top
               (if (null? stack)
                   (loop rest closes (add1 forms) stack)
                   (loop rest closes forms (cons (cons (caar stack) (add1 (cdar stack))) (cdr stack)))))
             (cond
-              [(open? c)                 (loop rest closes forms (cons (cons c 1) opens))]
+              [(open? c)                 (loop rest closes forms (cons (cons c 1) opens))]     ; push frame
               [(not (close? c))          (go opens)]                                            ; atom
-              [(null? opens)             (loop rest (cons (cons c (- (add1 forms))) closes) 1 opens)]
-              [(matching (caar opens) c) (go (cdr opens))]
-              [else                      'malformed])]))))
+              [(null? opens)             (loop rest (cons (cons c (- (add1 forms))) closes) 1 opens)] ; dangling closer
+              [(matching (caar opens) c) (go (cdr opens))]                                      ; pop matching frame
+              [else                      'malformed])]))))                                      ; kind clash
 
 ;; ---------- combine ----------
-;; Cancel the right's closers against the left's opens, kind-strict: a matching
-;; innermost pops (no bump -- the right chunk already counted that form via its
-;; forms := 1 dangling seed); a wrong kind is a clash -> 'malformed.  The right's
-;; leftover forms/opens then nest into the left's innermost surviving open.  If the
-;; left ends mid-atom and the right starts mid-atom, the right's leading atom is a
-;; continuation -- `drop-start` undoes the form it started.  'malformed absorbs; #f
-;; is the identity.
+;; Cancel the right's closers against the left's opens, kind-strict; leftovers nest
+;; into the left's innermost open. Mid-atom seam: `drop-start` undoes the form the
+;; right's leading atom began. 'malformed absorbs; #f is the identity. Lawful: scribble.
 (define (sexp+ x y)
   (define (drop-start y)
     (match y
@@ -132,9 +78,9 @@
       (match closes
         [(cons (cons k cv) rest)
          (cond
-           [(null? stack)             (loop 0 stack rest (cons (cons k (- cv forms)) out))]
-           [(matching (caar stack) k) (loop forms (cdr stack) rest out)]
-           [else                      'malformed])]
+           [(null? stack)             (loop 0 stack rest (cons (cons k (- cv forms)) out))] ; nothing left to cancel
+           [(matching (caar stack) k) (loop forms (cdr stack) rest out)]                    ; pop, no bump
+           [else                      'malformed])]                                          ; kind clash
         ['() (sexp-val xh (append xc (reverse out))
                        (if (null? stack) (+ forms yf) forms)
                        (if (null? stack) yo (append yo (if (zero? yf) stack (add-inner stack yf))))
@@ -152,19 +98,15 @@
 (define (sexp-opens  v) (if (sexp-val? v) (sexp-val-opens  v) '()))
 (define (sexp-closes v) (if (sexp-val? v) (sexp-val-closes v) '()))
 (define (sexp-forms  v) (if (sexp-val? v) (sexp-val-forms  v) 0))
-(define (sexp-head v) (and (sexp-val? v) (sexp-val-head v)))   ; class of first char, #f if empty/malformed
-(define (sexp-tail v) (and (sexp-val? v) (sexp-val-tail v)))   ; class of last char
+(define (sexp-head v) (and (sexp-val? v) (sexp-val-head v)))
+(define (sexp-tail v) (and (sexp-val? v) (sexp-val-tail v)))
 
 ;; ---------- reading a cut as spines ----------
-;; `sand-spines` is the summary's read interface for navigation -- the one reader of
-;; the value's fields it needs.  At a cut it reads the all-left `front` and all-right
-;; `back` spines, innermost-first (slot = the entry's count), with the ½ refinement on
-;; the HEAD only: at a form start the head is the raw integer; mid-atom it is pushed
-;; half-way into the atom (the one structurally invisible interior -- frames' interiors
-;; are spine-visible as depth, atoms' are not); whitespace binds to the previous form,
-;; leaning -½.  `front` slots are 0-based (the stored +1 drops at the read), `back` as
-;; stored (-1 = after the last form).  The spine algebra that compares against these
-;; lives in sexp-edit.rkt.
+;; `sand-spines` reads a cut as the all-left `front` and all-right `back` spines,
+;; innermost-first (slot = the entry's count); front 0-based (stored +1 drops at
+;; the read), back as stored (-1 = after the last form). The ½ head refinement
+;; (cut-kind) and its rationale are in scribble; the comparing algebra is in
+;; sexp-edit.rkt.
 
 ;; classify a cut by the two char-classes touching it: tail of L, head of R.
 ;;   start  a form begins here (atom or opener)      -- flush, no lean
@@ -179,8 +121,7 @@
     [(ws)    'lean]
     [else    'end]))                       ; R empty: the document end
 
-;; both full spines at a cut, innermost-first, ½ baked into the heads.  Entries are
-;; (bracket . count), so the slot is the cdr.
+;; both spines at a cut, innermost-first, ½ baked into the heads.
 (define (sand-spines L R)
   (match-define (cons fh fr) (append (map (lambda (e) (sub1 (cdr e))) (sexp-opens L)) (list (sexp-forms L))))
   (match-define (cons bh br) (append (map cdr (sexp-closes R)) (list (- (add1 (sexp-forms R))))))
@@ -190,41 +131,28 @@
     [(lean)      (values (cons (- fh 1/2) fr) (cons (- bh 1/2) br))]))
 
 ;; ---------- string summary (naive) ----------
-;; The seed of syntax highlighting in the summary: in-string state as a raw quote
-;; count.  The value is the number of " in a fragment; at a cut, (str-smr L) is the
-;; quote count to the left, and the in/out-of-string reading (a separate step) is its
-;; parity.  Naive on purpose -- it counts EVERY ", so escapes (\"), quotes inside
-;; comments, #\" char literals, and |...| symbols are not yet discounted.
+;; In-string state as a raw quote count; parity at a cut = in/out of a string. Naive
+;; on purpose -- escapes, comments, char literals, |...| not discounted (scribble).
 (define (str-leaf s)
   (for/sum ([c (in-string s)] #:when (char=? c #\")) 1))
-(define str-smr (make-summary str-leaf +))   ; combine = +, identity (str-leaf "") = 0
+(define str-smr (make-summary str-leaf +))
 
 ;; ---------- string + sexp summary (gated) ----------
-;; Reuses the sexp algebra, gated by string state: a " toggles in/out of a string,
-;; and sexp tokens (brackets AND atoms) inside a string are inert -- the whole string
-;; collapses to ONE form, an atom with an opaque interior.  Since a fragment cannot
-;; know whether it BEGINS inside a string (that depends on everything to its left),
-;; the value carries the sexp-val parsed under each entry mode -- entered in code,
-;; and entered mid-string -- plus the quote count (its parity is the gate).  The
-;; combine reuses `sexp+`; the only new logic is selecting which of the right
-;; operand's two sexp-vals to splice, by the left's parity.
-;;
-;; Each sexp-val is built by transforming the text to its code-equivalent: every
-;; string becomes a single delimited placeholder atom ("~") with its interior
-;; removed, so the existing tokenizer / fold / sand-spines treat the string exactly
-;; like an atom -- one form, a spine slot, a ½-leaned interior.
+;; Reuses `sexp+` gated by string state: a fragment can't know if it begins in a
+;; string, so it carries the sexp-val under each entry mode (code / mid-string) and
+;; the quote parity selects. Design in scribble.
 (struct cs (quotes code string) #:transparent)   ; count + sexp-val-if-code + sexp-val-if-string
 
-(define (transform s start-in-string?)            ; -> code-equivalent text (strings -> "~")
+(define (transform s start-in-string?)            ; -> code-equivalent text: each string -> the atom "~"
   (define out (open-output-string))
   (let loop ([chs (string->list s)] [in? start-in-string?])
     (cond
       [(null? chs) (get-output-string out)]
-      [(char=? (car chs) #\")                     ; a quote toggles the mode
-       (if in? (write-char #\space out) (write-string " ~" out))   ; close -> delimiter; open -> +placeholder
+      [(char=? (car chs) #\")
+       (if in? (write-char #\space out) (write-string " ~" out))   ; close -> delimiter, open -> placeholder
        (loop (cdr chs) (not in?))]
-      [in?  (loop (cdr chs) in?)]                 ; string interior: drop it
-      [else (write-char (car chs) out)            ; code char: keep
+      [in?  (loop (cdr chs) in?)]                 ; string interior: dropped
+      [else (write-char (car chs) out)
             (loop (cdr chs) in?)])))
 
 (define (strsexp-leaf s)
@@ -235,15 +163,15 @@
 (define (strsexp+ a b)
   (match-define (cs qa ca sa) a)
   (match-define (cs qb cb sb) b)
-  (define flip? (odd? qa))                         ; mode at the seam = entry XOR parity(a)
+  (define flip? (odd? qa))                         ; b's entry mode flips when a holds an odd # of quotes
   (cs (+ qa qb)
-      (sexp+ ca (if flip? sb cb))                  ; whole entered in code
-      (sexp+ sa (if flip? cb sb))))                ; whole entered in a string
+      (sexp+ ca (if flip? sb cb))
+      (sexp+ sa (if flip? cb sb))))
 
 (define strsexp-smr (make-summary strsexp-leaf strsexp+))
 
-;; reads at a cut: in-string is the left's quote parity; the spines reuse sand-spines
-;; on L's code sexp-val and R's parity-selected sexp-val (R's entry mode = L's parity).
+;; cut reads: in-string = L's quote parity; spines run sand-spines on L's code val and
+;; R's parity-selected val.
 (define (strsexp-in-string? L) (odd? (cs-quotes L)))
 (define (strsexp-spines L R)
   (sand-spines (cs-code L)

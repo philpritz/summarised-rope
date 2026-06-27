@@ -53,11 +53,6 @@
       [(? rope?)                                 (smr (rope-summary x))]
       [(? summary-part?)                         (part->summary x smr)]
       [_                                         x]))
-  ;; fold combine over the coerced parts via `variadic`, which supplies the fast
-  ;; unary/binary paths (nearly every call: rope ops combine two summaries, leaves
-  ;; coerce one); `(spread combine values coerce)` runs each element through coerce
-  ;; while the accumulator passes through (values). variadic folds the `id` seed in;
-  ;; (combine id x) = x leaves a lawful value unchanged.
   (define smr (variadic (spread combine values coerce) id))
   smr)
 

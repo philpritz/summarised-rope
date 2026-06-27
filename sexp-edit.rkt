@@ -1,36 +1,25 @@
 #lang racket
 
-;; Sexp navigation + editing on the summarised rope, on SIGNED SPINE indexes.
-;;
-;; An index is a spine: the per-level position list, innermost-first.  Slots are
-;; 0-BASED at every level.  EACH COMPONENT picks the side it reads at its level:
-;; >= -1/2 against the all-left `front` spine, <= -1 against the all-right `back`
-;; spine -- the pair `sand-spines` reads at a cut (summaries/summaries.rkt; -1 = after the
-;; last form).  The two ANCHORS of a position differ in the HEAD only: the path
-;; down to the cut's frame is a left-based name either way, and the head is
-;; anchored left or right within that frame -- `anchors` returns exactly this
-;; pair, and re-deriving the other head at a cursor IS the anchor flip
-;; (head-only, by one modulus).
-;;
-;; `spine-cmp` compares an index against a cut's (front, back) spines.  Under
-;; completion counting an open frame's interior is a prefix extension of the
-;; frame's own start slot, so the comparison is lexicographic (helper-algebras'
-;; `lexicographic`, outermost-first): read each level off the spine the index's
-;; component selects (front for >= -1/2, back for <= -1) and take the first
-;; non-zero componentwise verdict; a shorter spine sorts before a deeper one (a
-;; bare spine sits before everything deeper inside it -- the early exit that
-;; replaced the -inf padding).  Targets land on form starts AND on frames' END
-;; SLOTS -- slot N of an N-child frame.  A guide is one comparison.
-;;
-;; The layer is a comparison over the spines `sand-spines` reads (summaries/summaries.rkt):
-;; everything else is zipper-core.
+;; Sexp navigation + editing on the summarised rope, as a layer over zipper-core.
+;; An index is a SIGNED SPINE -- the per-level slot list, innermost-first, each
+;; component picking the side it reads (front >= -1/2, back <= -1, the pair
+;; `sand-spines` reads at a cut). The layer is one thing: a comparison over those
+;; spines (`spine-cmp`); everything else is zipper-core. The surface:
+;;   spine-cmp        front back index -> -1 | 0 | 1   -- the comparison (one guide's verdict)
+;;   slot-guide       index -> guide   -- a guide that also reads back as its index
+;;   modulus + base-left/base-right/flip  -- re-basing one index's head between its two anchors
+;;   cursor sexp-guides anchors re-anchor cover  -- place / re-anchor a cursor
+;;   edge-guide edge-index                       -- lenses onto one cursor edge
+;;   at move edge each both                      -- edit verbs: zipper -> zipper commands
+;; Index model, the two anchors, the lexicographic comparison, and the lens style:
+;; scribble/sexp-edit.scrbl.
 
 (require racket/match
          "rope-core.rkt"        ; make-rope multisect frame
          "summaries/sexp-summary.rkt"  ; sexp-smr, sand-spines
          "summaries/summaries.rkt"     ; bundle
          "zipper-core.rkt"      ; start zipper-guide zipper-edge zipper-focus to-root on-edges
-         "helper-algebras.rkt") ; on (bundle projection); lexicographic (spine-cmp); make-lens/list-of/lref (lens vocab)
+         "helper-algebras.rkt") ; on; lexicographic; make-lens/list-of/lref/ldiag (lens vocab)
 
 (provide spine-cmp              ; (spine-cmp front back index) -> -1 | 0 | 1
          slot-guide guide-index ; (slot-guide index) -> guide (carries its index)
@@ -46,32 +35,25 @@
          (all-from-out "zipper-core.rkt"))
 
 ;; ---------- the comparison ----------
-;; the ordinary 3-way order: -1 if a<b, +1 if a>b, 0 equal.
 (define (component-cmp a b) (cond [(< a b) -1] [(> a b) 1] [else 0]))
 
-;; the family tag: back components sit at <= -1, front at >= -1/2 (the -1/2 is
-;; a leaned head in a frame with no child counted yet -- whitespace right after
-;; an open paren).  The half-step gap keeps the families disjoint.
+;; the family tag: back at <= -1, front at >= -1/2; the half-step gap keeps them
+;; disjoint, so a leaned head (-1/2, ws after an open paren) still classes front.
 (define (back-component? c) (< c -1/2))
 
-;; an index component vs a cut element -- its (front . back) pair -- to a sign;
-;; the component picks its own anchoring (front >= -1/2, back <= -1), so all-left,
-;; all-right, and mixed indexes resolve uniformly.  Index first, so +1 = target
-;; right of the cut.
+;; an index component vs a cut element -- its (front . back) pair; the component
+;; picks its own side, so all-left/all-right/mixed resolve uniformly. Index first,
+;; so +1 = target right of the cut.
 (define (cut-cmp c fb) (component-cmp c (if (back-component? c) (cdr fb) (car fb))))
 
-;; zip the two co-indexed spines into one cut, then compare an index against it
-;; lexicographically, outermost-first; a shorter spine sorts before a deeper one
-;; (a bare spine sits before everything deeper inside it).
+;; zip the co-indexed spines into one cut, compare an index against it
+;; lexicographically, outermost-first (why naively lexicographic: scribble).
 (define (spine-cmp front back ix)         ; -> +1 boundary right of cut / 0 / -1
   ((lexicographic cut-cmp) (reverse ix) (reverse (map cons front back))))
 
 ;; ---------- the guide ----------
-;; A guide carries its index: callable as the comparator (one comparison; each
-;; component of the index picks its own side, split by `back-component?` at the
-;; half-step gap -- front >= -1/2, back <= -1, leans included), AND readable as
-;; the index, so the edit verbs reach the indices through `idxs` (zipper-guide ->
-;; list-of) without re-deriving from the zipper.
+;; A guide is BOTH callable as the comparator and readable as its index, so the
+;; edit verbs reach the indices through `idxs` without re-deriving from the zipper.
 (struct guide (index proc) #:property prop:procedure (struct-field-index proc))
 (define (slot-guide ix)
   (guide ix (lambda (L R)
@@ -85,32 +67,26 @@
     ((setter zipper-guide p) (start sexp-smr rope (first p) (second p)))))
 
 ;; ---------- anchors ----------
-;; each edge of the focus folds the focus to the other side; a gap (empty focus)
-;; collapses both to before | after.
+;; each edge folds the focus to the other side (a gap collapses both to before | after).
 (define (edge-contexts z i)               ; i: 0 = start edge, 1 = end edge
   ((on-edges (lambda (e0 e1) (apply values (if (zero? i) e0 e1))) list list) z))
 
-;; the two anchor indexes of edge i: the same left-based path, the head anchored
-;; left (off the before side) or right (off the after side).  Same position now;
-;; under edits within the frame each head follows its own side.  Re-navigating
-;; with the other one IS the flip.
+;; the two anchor indexes of edge i: same left-based path, head anchored left or
+;; right -- the right-headed one being (car b) over the left path. Why two: scribble.
 (define (anchors z i)
   (define-values (L R) (edge-contexts z i))
   (define-values (f b) ((on sand-spines sexp-smr) L R))
   (values f (cons (car b) (cdr f))))
 
 ;; ---------- re-basing ----------
-;; the modulus of a cut: front head - back head = N+1 at the cut's own level
-;; (the uniformity bar; encoding A's modulus over N forms).  Only the head
-;; re-bases -- the path components are a left-based name shared by both
-;; anchorings -- so the flip data is one number, exactly what one index alone
-;; cannot know.
+;; the cut's re-basing constant: front head - back head = N+1 at its level. The
+;; whole of the flip data, since only the head re-bases. Why one number: scribble.
 (define (modulus L R)
   (define-values (f b) ((on sand-spines sexp-smr) L R))
   (- (car f) (car b)))
 
-;; re-base an index's head, given the modulus of its own cut; `back-component?`
-;; dispatches on the head.  The shift is head-only, so the ½ heads carry for free.
+;; re-base an index's head, `back-component?` dispatching; head-only, so the ½
+;; heads and the path carry for free.
 (define ((base-left m) ix)               ; -> left-based head
   (if (back-component? (car ix)) (cons (+ (car ix) m) (cdr ix)) ix))
 (define ((base-right m) ix)              ; -> right-based head
@@ -123,44 +99,32 @@
   (modulus L R))
 
 ;; ---------- edge lenses ----------
-;; `zipper-edge` (zipper-core) is the lens onto one cursor edge; one hop more (a guide <-> its index)
-;; lands on its index.  Composition is plain `compose`; a write through the composite re-navigates
-;; once -- the put bottoms out in zipper-edge's put.  (peek puts the put-back first: index-of's view
-;; is `guide-index`, its put `slot-guide`.)
+;; `zipper-edge` (zipper-core) lenses onto one cursor edge's guide; one hop more,
+;; through `index-of`, lands on its index. A write through the composite re-navigates once.
 (define index-of (make-lens (lambda (g) (values slot-guide (guide-index g)))))  ; lens: a guide <-> its index
 (define (edge-guide i) (zipper-edge i))                     ; -> the guide at edge i
 (define (edge-index i) (compose (zipper-edge i) index-of))  ; -> its index
 
 ;; ---------- re-anchoring ----------
-;; install edge i's guide re-derived from the chosen side's anchor ('front |
-;; 'back), by setting that edge's lens: the anchor flip as a cursor operation.
-;; Same position now; the family decides how the edge follows future edits.
+;; install edge i's guide from the chosen side's anchor -- the anchor flip as a
+;; cursor operation. Same position now; the family decides how it follows edits.
 (define (re-anchor z i side)
   (define-values (front back) (anchors z i))
   (define g (slot-guide (if (eq? side 'front) front back)))
   ((setter (edge-guide i) g) z))
 
-;; cover: flip the SECOND guide onto its right anchor (the start already reads
-;; the left).  An edit between the edges then touches neither anchor's side,
-;; so the cursor keeps covering whatever replaces the focus.
+;; cover: flip the end onto its right anchor (the start already reads the left), so
+;; an edit between the edges touches neither anchor's side and the cursor keeps covering.
 (define (cover z) (re-anchor z 1 'back))
 
 ;; ---------- command vocabulary ----------
-;; STYLE -- inline the lenses; don't bind intermediates.  An ad-hoc edit threads the zipper through
-;; the composed lens in place rather than naming each step or chaining z0/z1/z2; `idxs` and the verbs
-;; are the only standing shorthands, and everything else inlines into one `setter`/`updater` that
-;; re-navigates once.
-;; The cursor verbs ride `idxs` (zipper-guide -> (list-of index-of) -> the index list), then choose a
-;; reach with a selector lens at the tail: `(ldiag i)` collapses to position i (the gap verbs), `(lref
-;; i)` singles one edge out, NO selector keeps the whole list (the seg verbs).  Each is a zipper ->
-;; zipper command rebuilding in a SINGLE put, re-navigating once:
-;;     at   -- gap at ix (ldiag);        move -- gap, f on the basis (ldiag);
-;;     edge -- one edge i (lref);        each / both -- a fn per edge / one fn over both, on the list.
-;; `slot` is the index-level helper: map the innermost slot, the frame (cdr) untouched, so each edge
-;; stays in its own sexp.  (`chain`, the trace pipe, lives in zipper-core's `internal` submodule.)
+;; The verbs ride `idxs` (zipper <-> the index list), then a selector lens at the tail picks the
+;; reach: `(ldiag i)` collapses to position i, `(lref i)` singles one edge, no selector keeps the
+;; list. Each is one setter/updater that re-navigates once. Point-free style, the reach per verb:
+;; scribble.
 (define idxs (compose zipper-guide (list-of index-of)))  ; zipper <-> (list ix0 ix1)
 
-(define ((slot h) ix) (cons (h (car ix)) (cdr ix)))
+(define ((slot h) ix) (cons (h (car ix)) (cdr ix)))      ; map the innermost slot; frame (cdr) untouched
 
 (define (at   ix)    (setter  (compose idxs (ldiag 0)) ix))                                    ; absolute gap at ix
 (define (move f)     (updater (compose idxs (ldiag 0)) f))                                     ; gap, f on the basis
@@ -360,15 +324,13 @@
     (check-equal? (~a ((viewer zipper-focus) ((both (slot add1)) z))) "cc"))    ; shift both edges
 
   ;; ========================================================================
-  ;; Document isos -- the tree-first scaffolding for the index battery.
+  ;; Document isos -- test scaffolding for the index battery (rationale: scribble).
   ;; Three genuine isos over the document's states (helper-algebras' `iso`):
   ;;   A  shape  <-> spines   (structure; fold / unfold)
   ;;   C  tree   <-> pieces   (content;   tokenize / parse)
   ;;   B  pieces <-> text     (text;      concat / lex)
   ;; tree rep: atom = string, frame = (list child ...); a bare shape uses () for
   ;; atoms.  The generator draws a bare shape, then populates atoms into it.
-  ;; (The guide-driven bridge -- spines locating the cuts in the text -- is the
-  ;; next step; these three isos are the free scaffolding it gets checked against.)
 
   ;; -- helpers --
   (define (map-group-by pairs)             ; group by car, collect cdrs, key order

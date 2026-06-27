@@ -19,9 +19,9 @@
          buffer-smr)
 
 ;; ---------- bundle: a product of summaries ----------
-;; (bundle c ...) -> a product smr; its value is a bundle-val keyed by each component's own
-;; smr, so (c bv) selects c's slot (gen:summary-part); read through it with (on g c). A MACRO,
-;; to capture component source names for printing (bundle-write).
+;; A bundle-val keys each component's value by that component's own smr, so (c bv) selects
+;; c's slot via gen:summary-part. A MACRO so it can capture component source names (the
+;; identifiers passed in) for display in bundle-write.
 
 (struct bundle-val (slots names)        ; slots : #hasheq(smr -> value) ; names : #hasheq(smr -> symbol), display-only
   #:transparent
@@ -61,8 +61,8 @@
 
 ;; ---------- plain-text metrics ----------
 ;; Each a monoid over a text measure, read at a cut off the all-left summary. Pointwise
-;; (char-smr) or seam-aware (word-smr): a value straddling a chunk boundary needs edge state
-;; and a combine that reconciles the seam. (summary-laws.rkt checks the battery on both.)
+;; (char-smr) needs no edge state; the seam-aware ones (word, linecol) carry head/tail
+;; fields so the combine can reconcile a value straddling a chunk boundary.
 
 (define char-smr (make-summary string-length +))
 
@@ -93,9 +93,9 @@
 (define linecol-smr (make-summary linecol-leaf linecol+))
 
 ;; ---------- the buffer bundle ----------
-;; sexp navigation AND the plain-text metrics in one product. Components keyed by smr IDENTITY
-;; (eq?): read each slot through THESE bindings, never a fresh (make-summary ...), or a
-;; different object misses the slot.
+;; sexp navigation AND the plain-text metrics in one product. Slots are keyed by smr IDENTITY
+;; (eq?), so read each through THESE exported bindings -- a fresh (make-summary ...) is a
+;; different object and misses the slot.
 (define buffer-smr (bundle sexp-smr char-smr word-smr linecol-smr))
 
 (module+ test

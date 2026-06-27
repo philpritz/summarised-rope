@@ -1,17 +1,16 @@
 #lang racket
 
 ;; Zipper: structured navigation + editing over a summarised rope, as a stack machine.
-;; The cursor is a `head` (before-summary · focus-rope · after-summary) + a crumb stack,
-;; each crumb a closure head -> head that rebuilds the parent focus.
-;; The surface: two lenses (read/edit via viewer, setter, updater) and the lifecycle pair.
-;;   zipper-guide   lens onto the cursor as the list (gs ge)  -- moving both edges at once
-;;   zipper-edge    (zipper-edge i): lens onto edge i         -- moving one edge (0 = start, 1 = end)
-;;   zipper-focus   lens onto the focus rope              -- editing
-;;   start / to-root                                       -- in, home
-;; EVERY WRITE NAVIGATES: each lens's put goes through the lift, so the cursor lands where the
-;; installed guides point on the new state (delete = (setter zipper-focus ""), insert = set at a gap).
-;; A guide is a comparator (L R) -> {-1,0,1}; a cursor is a start guide gs + an end guide ge, gap =
-;; gs=ge, seg = gs<ge. zipper-core is guide-AGNOSTIC. The machine is in scribble/zipper-core.scrbl.
+;; A cursor is two guides, start gs + end ge (gap = gs=ge, seg = gs<ge); the surface:
+;;   start         smr rope gs ge -> zipper      -- whole rope as focus, cursor installed
+;;   zipper-guide  lens onto the cursor as the list (gs ge)  -- moving both edges
+;;   zipper-edge   (zipper-edge i): lens onto edge i (0 = start, 1 = end) -- moving one
+;;   zipper-focus  lens onto the focus rope                  -- editing the content
+;;   to-root       fold the crumbs back -- the focus becomes the whole document
+;;   on-edges      read the two edges as cuts, spread and combine
+;; viewer/setter/updater (helper-algebras) drive the lenses; re-exported for callers.
+;; EVERY WRITE NAVIGATES (every lens put goes through the lift); guide-AGNOSTIC. Machine,
+;; pipeline, and the printing/lift rationale: scribble/zipper-core.scrbl.
 
 (require racket/match
          "rope-core.rkt"
@@ -40,8 +39,8 @@
 
 (define (empty smr) ((make-rope smr)))
 
-;; peek -- the store coalgebra: refocus a head onto a sub-rope. split: rope -> (values ls m rs);
-;; returns (values focus put) -- the descended head and the put-back the stack keeps as a crumb.
+;; refocus a head onto a sub-rope given split: rope -> (values ls m rs). Returns the descended
+;; head and the put-back -- a crumb (head -> head) the stack keeps to rebuild this level.
 (define ((peek smr) split h)
   (match-define (head b t a) h)
   (define-values (ls m rs) (split t))
@@ -105,8 +104,8 @@
 
 ;; contracts -- defined here, below the struct, because they mention zipper?.
 (define smr/c        procedure?)
-(define guide/c      procedure?)       ; shape only; the -1/0/1 codomain is enforced downstream
-;;   where guides are called (rope-core's multisect)
+(define guide/c      procedure?)       ; shape only; the -1/0/1 codomain is enforced where a guide
+                                       ; is called (rope-core's multisect)
 (define cmd/c        (-> zipper? zipper?))
 (define binop/c      (procedure-arity-includes/c 2))
 ;; a (van Laarhoven) lens: (a -> f a) -> (z -> f z).  Just a procedure -- the functor structure
@@ -116,18 +115,16 @@
 ;; start: a fresh zipper -- whole rope as focus, cursor installed but not yet navigated.
 (define (start smr rope gs ge) (zipper smr gs ge (head (smr "") rope (smr "")) '()))
 
-;; zipper-lift: thread each op the zipper's (smr gs ge), compose (rightmost runs first) with navigate
-;; as the permanent last op, reseal -- so every write lands where the guides point. (zipper-lift) with
-;; no ops = plain re-navigation. `pass` (helper-algebras) is the thrush: ((pass smr gs ge) op) = (op smr gs ge).
+;; zipper-lift: compose the ops (rightmost first) with navigate fixed as the permanent last op,
+;; then reseal -- so every write lands where the guides point. No ops = plain re-navigation.
 (define ((zipper-lift . ops) z)
   (match-define (zipper smr gs ge h k) z)
   ((apply compose (curry zipper smr gs ge)              ; curry reseals -- no cut
-          (map (pass smr gs ge) (cons navigate ops)))   ; pass threads each op the (smr gs ge) triple
+          (map (pass smr gs ge) (cons navigate ops)))   ; pass threads each op the (smr gs ge)
    h k))
 
-;; zipper-guide: the lens onto the whole cursor, viewed as the guide list (list gs ge) -- a SINGLE
-;; focus (the list); the put installs both new guides and re-navigates (the lift).  sexp-edit's verbs
-;; ride this list via list-of/lref.  (peek puts the put-back first, per the variadic optic.)
+;; zipper-guide: the lens onto the cursor as the guide list (list gs ge) -- a SINGLE focus (the
+;; list); the put installs both guides and re-navigates. sexp-edit's verbs ride it via list-of/lref.
 (define zipper-guide
   (make-lens (lambda (z)
              (match-define (zipper smr gs ge h k) z)
@@ -164,8 +161,8 @@
 
 ;; ---------- printing ----------
 
-;; prints as the marked document: gap -> before‸after, seg -> before⟦focus⟧after.
-;; pieces re-cut from the root with the guides -- relies on the guide-focus alignment every write keeps.
+;; prints as the marked document: gap -> before‸after, seg -> before⟦focus⟧after. pieces re-cut from
+;; the root with the guides, so it leans on the guide-focus alignment every write keeps (see scribble).
 (define (zipper-show z port)
   (match-define (list gs ge) ((viewer zipper-guide) z))
   (define smr  (zipper-smr z))
