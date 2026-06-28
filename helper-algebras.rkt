@@ -190,6 +190,60 @@
                   (if (zero? v) (loop (cdr xs) (cdr ys)) v))])))
 
 ;; ============================================================================
+;; WIP -- not yet load-bearing; surface and semantics may still move.
+;; ============================================================================
+
+(provide lockstep             ; (lockstep f g ...): N equivalent fns worn as one self-checking procedure
+         lockstep?            ; recognizes one
+         lockstep-on          ; (lockstep-on x): checking-on sibling; non-locksteps pass through
+         lockstep-off         ; (lockstep-off x): run only the trusted impl, raw; non-locksteps pass through
+         lockstep-mode)       ; 'on | 'off
+
+;; lockstep: bundle N functions that should compute the same thing, worn as one procedure.
+;; Born ON: every call runs all impls and checks they agree before returning the common
+;; result. Each impl's return is captured as a value tuple (so multiple-values impls work),
+;; and agreement is checked per value-position: a value column must be equal? across impls;
+;; a column where every impl returns a procedure isn't comparable yet, so its check rides
+;; down to the next application (a re-bundled lockstep in that slot); a procedure-vs-value
+;; split in a column, or differing tuple arities, is a disagreement. `lockstep-off` flips an
+;; instance to OFF: run only the trusted impl, raw -- one run, results unwrapped (a returned
+;; procedure comes back plain, no deferral). Trusted defaults to the LAST impl (we list the
+;; ordinary form first, the one to run when off last); `#:trusted i` overrides. Sound only
+;; for pure, deterministic fns -- N runs per call. The struct `steps` is private.
+(struct steps (fs mode trusted)
+  #:property prop:procedure
+  (lambda (self . args)
+    (case (steps-mode self)
+      [(off) (apply (list-ref (steps-fs self) (steps-trusted self)) args)]   ; one run, raw
+      [else
+       (define rss (map (lambda (f) (call-with-values (lambda () (apply f args)) list))
+                        (steps-fs self)))             ; one value tuple per impl
+       (define n (length (car rss)))
+       (unless (andmap (lambda (vs) (= (length vs) n)) rss)
+         (error 'lockstep "arity mismatch: ~e" rss))
+       (apply values
+        (for/list ([j (in-range n)])                  ; resolve column by column
+          (define col (map (lambda (vs) (list-ref vs j)) rss))
+          (cond
+            [(andmap procedure? col) (steps col 'on (steps-trusted self))]   ; defer to next apply
+            [(ormap procedure? col) (error 'lockstep "shape mismatch at value ~a: ~e" j col)]
+            [else
+             (for ([r (in-list (cdr col))] [i (in-naturals 1)])
+               (unless (equal? r (car col))
+                 (error 'lockstep "impl ~a fell out of step: ~e vs ~e" i r (car col))))
+             (car col)])))])))
+
+(define (lockstep #:trusted [t #f] . fs) (steps fs 'on (or t (sub1 (length fs)))))
+(define lockstep? steps?)
+(define lockstep-mode steps-mode)
+
+;; lockstep-on / -off are universal: flip a lockstep's mode, but pass any other value
+;; through untouched -- so arbitrary functions can be wrapped and simply no-op. This also
+;; lets you silence one deferred sub-stage: in ON mode each stage is itself a lockstep.
+(define (lockstep-on  x) (if (steps? x) (steps (steps-fs x) 'on  (steps-trusted x)) x))
+(define (lockstep-off x) (if (steps? x) (steps (steps-fs x) 'off (steps-trusted x)) x))
+
+;; ============================================================================
 (module+ test
   (require rackunit)
 
@@ -332,4 +386,53 @@
   (check-equal? ((viewer (vdiag 1)) 'a 'b 'c) 'b)
   (check-equal? (call-with-values (lambda () ((setter (vdiag 0) 'X) 'a 'b 'c)) list) '(X X X))
   (check-equal? (call-with-values (lambda () ((updater (vdiag 1) symbol->string) 'a 'b 'c)) list)
-                '("b" "b" "b")))
+                '("b" "b" "b"))
+
+  ;; --- WIP: lockstep -- equivalent twins agree, a bad twin and a shape split are caught ---
+  (define sos (lockstep (lambda (xs) (apply + (map (lambda (x) (* x x)) xs)))
+                        (lambda (xs) (foldl (lambda (x a) (+ a (* x x))) 0 xs))))
+  (check-equal? (sos '(1 2 3 4)) 30)                          ; both branches run and agree
+  (check-true (lockstep? sos))
+  (check-exn #rx"fell out of step"                            ; a buggy refactor is caught
+             (lambda () ((lockstep (lambda (n) (* n n)) (lambda (n) (* n 2))) 3)))
+  ;; higher-order: the check defers down the currying to the comparable leaf
+  (define adder (lockstep (lambda (a) (lambda (b) (+ a b)))
+                          (lambda (a) (lambda (b) (- b (- a))))))
+  (check-true (lockstep? (adder 10)))                         ; (adder 10) is itself a lockstep
+  (check-equal? ((adder 10) 5) 15)
+  (check-exn #rx"shape mismatch"                              ; fn vs value at the same stage
+             (lambda () ((lockstep (lambda (a) (lambda (b) (+ a b)))
+                                   (lambda (a) (+ a 100))) 2)))
+  ;; multiple values: agreement checked per value-position
+  (define mv (lockstep (lambda (a b) (values (+ a b) (* a b)))
+                       (lambda (a b) (values (+ b a) (* b a)))))   ; commuted twin
+  (check-equal? (call-with-values (lambda () (mv 3 4)) list) '(7 12))
+  (check-exn #rx"fell out of step"                            ; one value column disagrees
+             (lambda () ((lockstep (lambda (a b) (values a b))
+                                   (lambda (a b) (values a (add1 b)))) 1 2)))
+  (check-exn #rx"arity mismatch"                              ; differing tuple lengths
+             (lambda () ((lockstep (lambda (x) (values x x))
+                                   (lambda (x) x)) 5)))
+  ;; on/off: born on; off runs only the trusted impl (the LAST by default), raw
+  (define ordinary (lambda (xs) (apply + (map (lambda (x) (* x x)) xs))))
+  (define tuned    (lambda (xs) (foldl (lambda (x a) (+ a (* x x))) 0 xs)))   ; trusted (last)
+  (define ls (lockstep ordinary tuned))
+  (check-eq? (lockstep-mode ls) 'on)                          ; born on
+  (check-equal? (ls '(1 2 3)) 14)                             ; both run, agree
+  (define fast (lockstep-off ls))
+  (check-eq? (lockstep-mode fast) 'off)
+  (check-equal? (fast '(1 2 3)) 14)                           ; runs tuned only, raw
+  (check-eq? (lockstep-mode (lockstep-on fast)) 'on)          ; round-trips back
+  ;; off short-circuits: a disagreeing impl is never run, so no error
+  (check-equal? ((lockstep-off (lockstep (lambda (n) 'wrong) (lambda (n) (* n n)))) 3) 9)
+  ;; #:trusted overrides which impl off runs
+  (check-equal? ((lockstep-off (lockstep #:trusted 0 add1 sub1)) 10) 11)
+  ;; on/off are no-ops on non-locksteps
+  (check-eq? (lockstep-off ordinary) ordinary)
+  (check-equal? (lockstep-on 42) 42)
+  ;; off returns a raw function for HOFs -- no deferral, not a lockstep
+  (define curr (lockstep (lambda (a) (lambda (b) (+ a b)))
+                         (lambda (a) (lambda (b) (- b (- a))))))
+  (check-true  (lockstep? (curr 10)))                         ; on: each stage is a lockstep
+  (check-false (lockstep? ((lockstep-off curr) 10)))          ; off: plain closure
+  (check-equal? (((lockstep-off curr) 10) 5) 15))
