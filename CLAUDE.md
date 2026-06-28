@@ -35,5 +35,7 @@ lines below to match; a file left off is silently never loaded.
 @summaries/summaries.rkt
 @summaries/sexp-summary.rkt
 @sexp-edit.rkt
+@lines-edit.rkt
+@sexp-split.rkt
 @summaries/summary-laws.rkt
 @helper-algebras.rkt

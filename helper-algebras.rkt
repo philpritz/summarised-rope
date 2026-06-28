@@ -12,6 +12,7 @@
          expt-iso                ; integer powers of an iso (scmutils function arithmetic)
          iso-law? check-iso-laws ; round-trip predicate; the inputs that fail it
          make-lens               ; (make-lens peek): a coalgebra -> a variadic lens
+         iso->lens               ; view an iso as a lens (its put ignores the original -- that absence IS the iso)
          viewer setter updater   ; the lens ops, curried (viewer gets, optional k folds the view; setter/updater command)
          list-of                 ; map an element lens over a list -- ONE focus
          lref                    ; index a list, fanning to N foci; length-safe
@@ -66,6 +67,11 @@
 (define ((viewer  l [k values]) . s) (apply k (const-box-vs (apply (l (lambda foci (const-box foci))) s))))  ; optional k folds the view (optics `views`)
 (define ((setter  l . xs) . s) (apply (l (lambda _    (apply values xs))) s))
 (define ((updater l . fs) . s) (apply (l (lambda foci (apply values (map (lambda (f x) (f x)) fs foci)))) s))
+
+;; iso->lens: an iso worn as a lens -- view is its forward map, put is its backward map. The put
+;; ignores the original structure (only the new focus matters), which is exactly what makes it an
+;; iso rather than a general lens; so (compose some-lens (iso->lens i)) composes with no fuss.
+(define (iso->lens i) (make-lens (lambda (s) (values (iso-from i) (i s)))))
 
 ;; list-of: a single-focus element lens lifted over a list -- ONE focus (the list of
 ;; views); the put rebuilds element-wise. Stays single-value until `lref` fans out.
