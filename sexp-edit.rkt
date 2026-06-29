@@ -8,8 +8,8 @@
 ;;   spine-cmp        front back index -> -1 | 0 | 1   -- the comparison (one guide's verdict)
 ;;   slot-guide       index -> guide   -- a guide that also reads back as its index
 ;;   cut-index        L R -> index     -- read an index straight off a cut (front anchor)
-;;   modulus + base-left/base-right/flip  -- re-basing one index's head between its two anchors
-;;   cursor sexp-guides anchors re-anchor cover   -- place / re-anchor a cursor
+;;   cursor sexp-guides                          -- place a cursor
+;;   anchors reanchor cover                      -- edge i's snapped anchor (i picks side+rounding); re-anchor; cover
 ;;   reguide front-guide back-guide               -- (reguide gl gr): set each edge's guide from its cut (L R -> guide)
 ;;   edge-guide edge-index                       -- lenses onto one cursor edge
 ;;   at move edge each both                      -- edit verbs: zipper -> zipper commands
@@ -26,10 +26,9 @@
 (provide spine-cmp              ; (spine-cmp front back index) -> -1 | 0 | 1
          slot-guide guide-index ; (slot-guide index) -> guide (carries its index)
          cut-index              ; (cut-index L R) -> front index, read off a cut's sides (no guide)
-         modulus base-left base-right flip  ; re-basing: head-only, by one modulus
          sexp-guides cursor     ; cursor conveniences over zipper-core
-         edge-contexts anchors edge-modulus
-         re-anchor cover        ; the anchor flip as a cursor operation
+         edge-contexts anchors  ; edge i's cut; edge i's snapped anchor (i picks side+rounding)
+         reanchor cover         ; re-anchor edge i to its snapped anchor; cover = both edges
          reguide                ; (reguide gl gr): set each edge's guide from its cut
          front-guide back-guide ; L R -> guide at an anchor (reguide's makers)
          edge-guide edge-index  ; lenses onto one cursor edge (its guide / its index)
@@ -78,52 +77,38 @@
   (let ([p (sexp-guides s e)])
     ((setter zipper-guide p) (start sexp-smr rope (first p) (second p)))))
 
-;; ---------- anchors ----------
-;; each edge folds the focus to the other side (a gap collapses both to before | after).
-(define (edge-contexts z i)               ; i: 0 = start edge, 1 = end edge
-  ((on-edges (lambda (e0 e1) (apply values (if (zero? i) e0 e1))) list list) z))
+;; ============================================================================
+;; Guides: lenses & transforms -- everything that lenses onto the cursor's guides
+;; or transforms their indices, gathered here.
+;; ============================================================================
 
-;; the two anchor indexes of edge i: same left-based path, head anchored left or
-;; right -- the right-headed one being (car b) over the left path. Why two: scribble.
-(define (anchors z i)
-  (define-values (L R) (edge-contexts z i))
-  (define-values (f b) ((on sand-spines sexp-smr) L R))
-  (values f (cons (car b) (cdr f))))
-
-;; ---------- re-basing ----------
-;; the cut's re-basing constant: front head - back head = N+1 at its level. The
-;; whole of the flip data, since only the head re-bases. Why one number: scribble.
-(define (modulus L R)
-  (define-values (f b) ((on sand-spines sexp-smr) L R))
-  (- (car f) (car b)))
-
-;; re-base an index's head, `back-component?` dispatching; head-only, so the ½
-;; heads and the path carry for free.
-(define ((base-left m) ix)               ; -> left-based head
-  (if (back-component? (car ix)) (cons (+ (car ix) m) (cdr ix)) ix))
-(define ((base-right m) ix)              ; -> right-based head
-  (if (back-component? (car ix)) ix (cons (- (car ix) m) (cdr ix))))
-(define ((flip m) ix)                    ; the other anchoring; an involution
-  (((if (back-component? (car ix)) base-left base-right) m) ix))
-
-(define (edge-modulus z i)               ; the modulus at edge i, staged like anchors
-  (define-values (L R) (edge-contexts z i))
-  (modulus L R))
-
-;; ---------- edge lenses ----------
-;; `zipper-edge` (zipper-core) lenses onto one cursor edge's guide; one hop more,
-;; through `index-of`, lands on its index. A write through the composite re-navigates once.
+;; ---------- lenses onto the guides ----------
+;; `zipper-edge`/`zipper-guide` (zipper-core) lens onto the cursor's guides; one hop more, through
+;; `index-of`, lands on the index each carries. A write through a composite re-navigates once.
 (define index-of (make-lens (lambda (g) (values slot-guide (guide-index g)))))  ; lens: a guide <-> its index
 (define (edge-guide i) (zipper-edge i))                     ; -> the guide at edge i
 (define (edge-index i) (compose (zipper-edge i) index-of))  ; -> its index
+(define idxs (compose zipper-guide (list-of index-of)))     ; zipper <-> (list ix0 ix1)
 
-;; ---------- re-anchoring ----------
-;; install edge i's guide from the chosen side's anchor -- the anchor flip as a
-;; cursor operation. Same position now; the family decides how it follows edits.
-(define (re-anchor z i side)
-  (define-values (front back) (anchors z i))
-  (define g (slot-guide (if (eq? side 'front) front back)))
-  ((setter (edge-guide i) g) z))
+;; ---------- anchors & re-anchoring ----------
+;; edge-contexts: edge i's cut as its two side-summaries (a gap collapses both to before | after).
+(define (edge-contexts z i)               ; i: 0 = start edge, 1 = end edge
+  ((on-edges (lambda (e0 e1) (apply values (if (zero? i) e0 e1))) list list) z))
+
+;; anchors z i -> edge i's anchor, snapped to a clean slot; the side AND rounding read off i:
+;;   i=0 (start): front head FLOORED   -> the form's start
+;;   i=1 (end):   back  head CEILING'd -> past the form
+;; clean integer heads are fixed points; a mid-atom/ws ½ head snaps outward, so a mid-atom
+;; cursor brackets the atom. Why floor/ceiling, why per-i: scribble.
+(define (anchors z i)
+  (define-values (L R) (edge-contexts z i))
+  (define-values (f b) ((on sand-spines sexp-smr) L R))
+  (if (zero? i)
+      (cons (floor   (car f)) (cdr f))     ; start
+      (cons (ceiling (car b)) (cdr f))))   ; end
+
+;; reanchor: install edge i's guide from its snapped anchor (read off the cut, re-navigates).
+(define ((reanchor i) z) ((setter (edge-index i) (anchors z i)) z))
 
 ;; reguide: install a guide at each cursor edge, computed from that edge's cut (its L R).
 ;;   gl, gr : L R -> guide   -- the start edge's maker, the end edge's maker.
@@ -143,17 +128,15 @@
 ;; reguide: re-guide the start edge, then the end edge.
 (define (reguide gl gr) (compose (re-edge 1 gr) (re-edge 0 gl)))
 
-;; cover: flip the end onto its right anchor (the start already reads the left), so
-;; an edit between the edges touches neither anchor's side and the cursor keeps covering.
-(define (cover z) (re-anchor z 1 'back))
+;; cover: the start to its front anchor, the end to its back anchor, so an edit between the
+;; edges touches neither side and the cursor keeps covering (a mid-atom cursor brackets its atom).
+(define cover (compose (reanchor 1) (reanchor 0)))
 
 ;; ---------- command vocabulary ----------
-;; The verbs ride `idxs` (zipper <-> the index list), then a selector lens at the tail picks the
+;; The verbs ride `idxs` (the index-list lens, above), then a selector lens at the tail picks the
 ;; reach: `(ldiag i)` collapses to position i, `(lref i)` singles one edge, no selector keeps the
 ;; list. Each is one setter/updater that re-navigates once. Point-free style, the reach per verb:
 ;; scribble.
-(define idxs (compose zipper-guide (list-of index-of)))  ; zipper <-> (list ix0 ix1)
-
 (define ((slot h) ix) (cons (h (car ix)) (cdr ix)))      ; map the innermost slot; frame (cdr) untouched
 
 ;; The list-based verbs are commented out -- exploring the values-based lenses (idxs fanned to
@@ -279,73 +262,31 @@
   (check-equal? (doc ((setter zipper-focus "xx ") (cursor rope2 (front-of "(aa (p q) cc)" 7))))
                 "(aa (p xx q) cc)")
 
-  ;; --- anchors: read both at the cursor, and they diverge under editing ---
-  (let*-values ([(z) (cursor rope ^bb)]
-                [(front back) (anchors z 0)])
+  ;; --- anchors: edge 0 reads its front anchor, edge 1 its back; they name the same gap now
+  ;; but diverge under editing (front stays left, back follows right) ---
+  (let* ([z     (cursor rope ^bb)]
+         [front (anchors z 0)]
+         [back  (anchors z 1)])
     (check-equal? front '(1 0))
     (check-equal? back  '(-3 0))                       ; right head over the left path
     (define rope1 ((viewer zipper-focus) (to-root ((setter zipper-focus "xx ") z))))
     (check-equal? (cuts rope1 front) (cons "(aa " "xx bb cc)"))  ; left-anchored: stays by aa
     (check-equal? (cuts rope1 back)  (cons "(aa xx " "bb cc)"))) ; right-anchored: stays by bb
 
-  ;; --- cut-index: read the front index straight off an edge's sides via the viewer continuation
-  ;; (the edge-sides lens), no guide-index -- agrees with anchors' front ---
-  (let*-values ([(z) (cursor rope ^bb)]
-                [(front back) (anchors z 0)])
+  ;; --- cut-index: the front index straight off an edge's sides via the viewer continuation
+  ;; (the edge-sides lens), no guide -- agrees with edge 0's anchor ---
+  (let ([z (cursor rope ^bb)])
     (check-equal? ((viewer (edge-sides 0) cut-index) z) ^bb)
-    (check-equal? ((viewer (edge-sides 0) cut-index) z) front))
+    (check-equal? ((viewer (edge-sides 0) cut-index) z) (anchors z 0)))
 
-  ;; --- re-basing: every cut (incl. mid-atom ½s, whitespace, and the -1/2 head
-  ;; after an open paren) -- the modulus is integral, head-basing reproduces the
-  ;; anchor pair, flip is an involution ---
-  (for ([str '("(aa bb cc)" "(aa (p q) cc)" "((a) (b (c)) d)" "aa bb cc"
-               "( aa)" "(aa )")])
-    (for ([i (in-range 1 (string-length str))])
-      (define-values (L R) (sides str i))
-      (define-values (f b) (sand-spines L R))
-      (define m (modulus L R))
-      (define mixed (cons (car b) (cdr f)))            ; the right-headed anchor
-      (check-true (exact-integer? m) (format "~s cut ~a modulus ~s" str i m))
-      (check-equal? ((base-right m) f) mixed (format "~s cut ~a -> right head" str i))
-      (check-equal? ((base-left m) mixed) f (format "~s cut ~a -> left head" str i))
-      (check-equal? ((flip m) ((flip m) f)) f (format "~s cut ~a involution" str i))))
+  ;; --- anchors snap: floor/ceiling per i, so a clean cut covers as a gap while a cut
+  ;; inside an atom brackets the whole atom ---
+  (let ([gm (cover (cursor rope '(3/2 0)))])      ; a gap inside "bb" (mid-atom, head 3/2)
+    (check-equal? (~a ((viewer zipper-focus) gm)) "bb "))   ; cover snaps to select the atom
+  (let ([gc (cover (cursor rope ^bb))])           ; a clean gap at ^bb
+    (check-equal? (~a ((viewer zipper-focus) gc)) ""))      ; stays a gap
 
-  ;; --- the modulus itself: N+1 at the cut's own level ---
-  (check-equal? (let-values ([(L R) (sides "(aa bb cc)" 4)]) (modulus L R))
-                4)                        ; 3 forms in the frame +1
-  (check-equal? (let-values ([(L R) (sides "(aa (p q) cc)" 7)]) (modulus L R))
-                3)                        ; 2 forms in (p q) +1
-
-  ;; --- a flipped index is a real index: same gap now, the other anchor after ---
-  (let* ([z     (cursor rope ^bb)]
-         [back* ((flip (edge-modulus z 0)) ^bb)])
-    (check-equal? back* '(-3 0))                       ; right head, path untouched
-    (check-equal? (doc ((setter zipper-focus "xx ") (cursor rope back*))) "(aa xx bb cc)")
-    (define rope1 ((viewer zipper-focus) (to-root ((setter zipper-focus "xx ") z))))
-    (check-equal? (cuts rope1 ^bb)   (cons "(aa " "xx bb cc)"))
-    (check-equal? (cuts rope1 back*) (cons "(aa xx " "bb cc)")))
-
-  ;; --- the guide lens: an anchor flip installs and re-navigates to the SAME
-  ;; gap (L2); editing afterwards behaves as the flipped family ---
-  (let* ([z  (cursor rope ^bb)]
-         [zb ((setter zipper-guide (sexp-guides ((flip (edge-modulus z 0)) ^bb))) z)])
-    (check-equal? (~a ((viewer zipper-focus) zb)) "")                          ; same gap at flip-time
-    (check-equal? (doc ((setter zipper-focus "xx ") zb)) "(aa xx bb cc)"))
-
-  ;; --- re-anchoring the END edge via the lens's modify face makes the cursor
-  ;; edit-stable: it keeps covering the focus across replace and delete ---
-  (let* ([z  (cursor rope ^bb ^cc)]                            ; both front: end drifts under edits
-         [e* ((flip (edge-modulus z 1)) ^cc)]                  ; re-anchor the end's head on its right side
-         [z  ((setter (edge-guide 1) (slot-guide e*)) z)])     ; install the flipped end guide
-    (check-equal? (~a ((viewer zipper-focus) z)) "bb ")                        ; same seg at flip-time
-    (let ([z* ((setter zipper-focus "x1 x2 ") z)])
-      (check-equal? (~a ((viewer zipper-focus) z*)) "x1 x2 ")                  ; replace re-navigated: still covering
-      (check-equal? (doc z*) "(aa x1 x2 cc)")
-      (let ([zg ((setter zipper-focus "") z*)])                            ; delete collapses to the gap
-        (check-equal? (~a ((viewer zipper-focus) zg)) "")
-        (check-equal? (doc ((setter zipper-focus "yy ") zg)) "(aa yy cc)")))) ; and editing chains on
-
-  ;; --- cover: flip the second guide; the right anchor stays fixed while the
+  ;; --- cover: re-anchor the end onto its back anchor; the right anchor stays fixed while the
   ;; stuff inside is edited ---
   (let* ([z  (cover (cursor rope2 (front-of "(aa (p q) cc)" 7)))] ; covered gap at ^q
          [z1 ((setter zipper-focus "x ") z)]

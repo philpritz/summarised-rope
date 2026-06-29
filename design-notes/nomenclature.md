@@ -11,8 +11,8 @@ Names come from two streaks, and most terms belong to one:
 - **Physical** — the rope is material you shape. You `carve` it, `frame`
   a guide in its context, `cover` a region, `sand` a spine smooth. Verbs of
   working a material.
-- **Structural / arithmetic** — the index and its algebra. `multisect`, `flip`,
-  `base-left/right` — positions and the arithmetic that re-bases them.
+- **Structural / arithmetic** — the index and its algebra. `multisect`, `anchors`,
+  `reanchor` — positions and the arithmetic that re-bases them.
 
 The split is deliberate: a physical verb names *an operation on the rope*; an
 arithmetic term names *a fact about the index*. When a new name is needed, pick the
@@ -40,8 +40,9 @@ family by which of those it is.
 - **spine** — the per-level slot list realizing an index, innermost-first.
 - **anchor** — one of the two indexes naming the same position, one read off the text
   to its left, one off the text to its right; under edits each follows its own side.
-  **flip** is the involution between the two; **re-anchor** swaps a cursor edge to the
-  other; **cover** is the re-anchoring that keeps a cursor wrapping its focus across edits.
+  **anchors** reads a cursor edge's anchor (the edge index `i` picks the side and snaps a
+  ½ head to a clean slot); **reanchor** installs it; **cover** is the re-anchoring that keeps
+  a cursor wrapping its focus across edits.
 
 **Heads and cursors**
 - **head** — `before · focus · after`: the focus rope flanked by the summaries of
