@@ -19,6 +19,7 @@
          ldiag                   ; the list diagonal -- view i, put broadcasts to all
          varg                    ; rearrange the value stream by position
          vdiag                   ; the value-stream diagonal -- view i, put broadcasts to all (ldiag on values)
+         pure                    ; (pure v ...): the constant fn, ignoring its args and returning the v ... as values (K)
          on                      ; (on op f) a ... = (op (f a) ...) -- Haskell's `on`
          arg                     ; project args by 0-based position
          pass                    ; apply each f to the fixed args, as values
@@ -115,6 +116,11 @@
   (make-lens (lambda structvals
     (values (lambda (x) (apply values (make-list (length structvals) x)))
             (list-ref structvals i)))))
+
+;; pure: the constant function, variadic in its result -- (pure v ...) ignores its
+;; arguments and returns the v ... as values. The K combinator, lifting plain values
+;; into a transform that disregards its input (e.g. a re-edge that just installs v).
+(define ((pure . vs) . _) (apply values vs))
 
 ;; on: (on op f) a b ... = (op (f a) (f b) ...) -- the n-ary Haskell `on`. E.g.
 ;; (on guide smr) reads each side of a guide through a summary.
@@ -290,6 +296,11 @@
   (define bad (iso add1 add1))             ; from doesn't undo to
   (check-false (iso-law? bad 10))
   (check-equal? (check-iso-laws bad '(1 2 3)) '(1 2 3))
+
+  ;; --- pure: the constant fn -- ignores its args, returns the v ... as values ---
+  (check-equal? ((pure 5) 'a 'b) 5)                                            ; any args ignored
+  (check-equal? (call-with-values (lambda () ((pure 1 2 3) 'x)) list) '(1 2 3)) ; variadic -> values
+  (check-equal? (call-with-values (lambda () ((pure))) list) '())              ; no values
 
   ;; --- on: every argument projected through f, then op (any arity) ---
   (check-equal? ((on + abs) -3 4) 7)               ; abs each, then +
