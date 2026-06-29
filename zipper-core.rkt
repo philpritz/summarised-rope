@@ -111,8 +111,7 @@
                                        ; is called (rope-core's multisect)
 (define cmd/c        (-> zipper? zipper?))
 (define binop/c      (procedure-arity-includes/c 2))
-;; a (van Laarhoven) lens: (a -> f a) -> (z -> f z).  Just a procedure -- the functor structure
-;; isn't a flat contract, and the ops (viewer/setter/updater) enforce the shape in use.
+;; just procedure? -- a lens's functor structure isn't a flat contract (see scribble Internals).
 (define lens/c       procedure?)
 
 ;; start: a fresh zipper -- whole rope as focus, cursor installed but not yet navigated.
@@ -143,10 +142,8 @@
                  (values (lambda (g) ((zipper-lift) (zipper smr g  ge h k))) gs)
                  (values (lambda (g) ((zipper-lift) (zipper smr gs g  h k))) ge)))))
 
-;; zipper-head: the lens onto the machine head (before . focus . after). The put reinstalls the
-;; head and re-navigates, coercing the focus field (make-rope) so a raw-content head re-enters the
-;; machine as a rope -- the head-installation boundary, where every write lands and navigates. A
-;; bare head carries no smr, so the coercion lives here (smr in scope), not in head-focus.
+;; zipper-head: the lens onto the machine head (before . focus . after); the put reinstalls it,
+;; coercing the focus to a rope (smr in scope here) and re-navigating. The coercion boundary: scribble.
 (define zipper-head
   (make-lens (lambda (z)
              (match-define (zipper smr gs ge h k) z)
@@ -162,15 +159,12 @@
              (match-define (head b t a) h)
              (values (lambda (t*) (head b t* a)) t))))
 
-;; zipper-focus: zipper-guide's twin, the lens onto the focus rope -- the head lens composed with
-;; the head's focus lens. The put swaps in content (make-rope coerces) and re-navigates.
-;; delete = (setter zipper-focus "").
+;; zipper-focus: the lens onto the focus rope, zipper-guide's twin; the put swaps in content and
+;; re-navigates, delete = (setter zipper-focus ""). Decomposition + coercion: scribble Internals.
 (define zipper-focus (compose zipper-head head-focus))
 
-;; edge-sides: lens onto edge i's summary cut as two foci L R, read straight off a zipper -- smr
-;; taken from the zipper, the focus folded into the far side (start: before | focus·after; end:
-;; before·focus | after). The put writes a GAP at the cut and re-navigates (through zipper-head).
-;; Consume via the viewer continuation (k receives L R), e.g. cut-index or list.
+;; edge-sides: lens onto edge i's summary cut as two foci L R, read off a zipper; the put writes a
+;; gap at the cut and re-navigates. Consume the view with a k receiving L R. Mechanics: scribble.
 (define (edge-sides i)
   (make-lens
    (lambda (z)

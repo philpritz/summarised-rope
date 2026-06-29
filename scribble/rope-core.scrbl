@@ -167,6 +167,13 @@ Removing that special case is exactly what keeps the cutting interface a @emph{g
 leaf path to feed, the guide itself --- comparing summaries as the descent halves into a leaf ---
 locates the exact gap, no companion splitter required.
 
+@subsection{frame is transient, never stored}
+
+@racket[frame] bakes outer context into a guide so it judges within the focus, but the result is
+an opaque closure --- a structured guide (a sexp slot-guide, say) is no longer readable as its
+index through it. So the machine frames a guide only to judge a single cut and then discards it
+(@racket[multisect] and the zipper's @racket[navigate] both do this); it never frames-and-stores.
+
 @subsection{Contracts: smr/c and guide/c}
 
 @racket[smr/c] is just @racket[procedure?], deliberately not @racket[(unconstrained-domain-> any/c)]:

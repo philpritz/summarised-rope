@@ -135,6 +135,8 @@
          [ 1 (let-values ([(rl rr) (descend L r after)]) (values (rope-join l rl) rr))]   ; cut lies right
          [-1 (let-values ([(ll lr) (descend before l R)]) (values ll (rope-join lr r)))])])))  ; cut lies left
 
+;; bake outer context (b, a) into a guide so it judges as if it saw the whole document. Used
+;; transiently to judge a cut, then discarded -- never frame-and-store (see scribble Internals).
 (define ((frame combine b a) g)
   (lambda (l r) (g (combine b l) (combine r a))))
 

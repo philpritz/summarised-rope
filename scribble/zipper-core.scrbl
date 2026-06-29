@@ -252,3 +252,32 @@ stands exactly where its guides point, so the re-cut reproduces the focus.
 @margin-note{A guide-free reconstruction off the crumbs was sketched and @bold{parked};
 every zipper carries a cursor (@racket[start] requires one), so there is no guideless
 case to fall back on.}
+
+@subsection{zipper-focus, zipper-head, and the coercion boundary}
+
+@racket[zipper-focus] is @racket[(compose zipper-head head-focus)]. @racket[zipper-head] is
+the lens onto the whole machine head (@racket[before] · @racket[focus] · @racket[after]);
+@racket[head-focus] the lens onto just the focus field. The split puts the @racket[make-rope]
+coercion in @racket[zipper-head], where the zipper's summary is in scope: a bare head carries
+no summary, so a raw-content focus (a string handed to a put) is coerced back into a rope at
+head installation --- the boundary where every write lands and re-navigates. @racket[head-focus]
+only swaps the field, leaving the flanking summaries. Both are private; only @racket[zipper-focus]
+is exported.
+
+@subsection{edge-sides: a cut read as two foci}
+
+@racket[(edge-sides i)] is the lens onto edge @racket[i]'s summary cut, read straight off a
+zipper. The focus folds into the side the edge doesn't face --- the start edge reads
+(@racket[before] @litchar{|} @racket[focus]·@racket[after]), the end edge
+(@racket[before]·@racket[focus] @litchar{|} @racket[after]) --- so the two foci @racket[L]
+@racket[R] are the summaries flanking that one boundary. Its put writes a gap at the cut and
+re-navigates (through @racket[zipper-head]). Consume the view with a continuation @racket[k]
+(@racket[viewer]'s optional fold): @racket[k] receives @racket[L] @racket[R] --- @racket[cut-index]
+reads a sexp index off them, @racket[list] collects the pair.
+
+@subsection{Contracts: lens/c}
+
+@racket[lens/c] is just @racket[procedure?]: a van Laarhoven lens is
+@racket[(-> (-> any/c f) (-> zipper? f))], whose functor structure isn't a flat contract, and the
+ops (@racket[viewer] / @racket[setter] / @racket[updater]) enforce the shape in use --- so the flat
+predicate is all the contract can check.
