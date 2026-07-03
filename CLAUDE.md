@@ -34,8 +34,10 @@ lines below to match; a file left off is silently never loaded.
 @zipper-core.rkt
 @summaries/summaries.rkt
 @summaries/sexp-summary.rkt
+@summaries/lisp-summary.rkt
 @sexp-edit.rkt
 @lines-edit.rkt
 @sexp-split.rkt
+@lisp-edit.rkt
 @summaries/summary-laws.rkt
 @helper-algebras.rkt
