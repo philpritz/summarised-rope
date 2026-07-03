@@ -332,3 +332,26 @@ the same values as the generic tail.
   from that scope. Any larger arity falls to @tt{rest-loop}, which reifies the tuple as a
   list and threads it back via @racket[(compose list improve)].}
 ]
+
+@section{Row lifts}
+
+@racket[lref], @racket[ldiag], and @racket[list-of] take a one-list world with the
+put policy baked in. The row lifts factor the policy out into an opt:
+
+@verbatim{
+  P               : (v1 ... vk)       <-> view; news; put -> j values
+  (opt-lref n P)  : (list1 ... listk) <-> same view/news;  put -> j lists, written at n
+  (opt-ldiag n P) :                        same, broadcast along each written list
+  (opt-list P)    :                    <-> view/news LISTIFIED; P at every index
+}
+
+The one law: the lifted opt has @emph{P's signature with every world component
+wrapped in a list} --- arities inherit, so a policy/outer mismatch is an arity
+error at the seam, never a silent drop.
+
+@racket[focal] is the context-discipline policy --- whole row in view, first
+value writable, one value back --- so @racket[(opt-lref n focal)] reads "slot n of
+the focal list, its context in view". @racket[(varg 0)] as the policy gives
+symmetric puts (every list returned rebuilt); @racket[(vdiag 0)] broadcasts one
+value @emph{across} the lists at n, the orthogonal diagonal to @racket[ldiag]'s
+along-the-list broadcast.
