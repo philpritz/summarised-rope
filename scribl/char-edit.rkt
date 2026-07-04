@@ -5,7 +5,7 @@
 ;; position is named by a character offset; the whole thing mirrors the sexp
 ;; system in miniature.  Four atoms define the system -- the summary, the guide,
 ;; the family split, and the cut's anchors -- and everything else is placement,
-;; covering, and navigation written with the lens ops on zipper-guide.
+;; covering, and navigation written with the opt ops on zipper-guide.
 
 (require "../rope-core.rkt" "../zipper-core.rkt")
 
@@ -35,7 +35,7 @@
 ;; placement: start a fresh zipper with two index-guides, then navigate to them
 ;; (one index = a gap).
 (define (cursor rope s [e s])
-  (let ([gs (vector (idx s) (idx e))]) ((setter zipper-guide gs) (start char-smr rope gs))))
+  (let ([gs (vector (idx s) (idx e))]) (((opt-set zipper-guide) gs) (start char-smr rope gs))))
 
 ;; cover: re-anchor the end edge onto its back anchor, so edits between the edges
 ;; stay wrapped.  Reads both anchors fresh and installs the back one at edge 1.
@@ -44,7 +44,7 @@
 (define (anchors z i) (call-with-values (lambda () (edge-contexts z i)) read-cut))
 (define (cover z)
   (define-values (front back) (anchors z 1))
-  ((updater zipper-guide (lambda (gs) (vector (vector-ref gs 0) (idx back)))) z))
+  ((opt-update zipper-guide (lambda (gs) (vector (vector-ref gs 0) (idx back)))) z))
 
 ;; navigation: reposition the cursor (install fresh guides on the current zipper).
-(define (goto s [e s]) (lambda (z) ((setter zipper-guide (vector (idx s) (idx e))) z)))
+(define (goto s [e s]) (lambda (z) (((opt-set zipper-guide) (vector (idx s) (idx e))) z)))

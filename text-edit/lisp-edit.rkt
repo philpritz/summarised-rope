@@ -17,20 +17,20 @@
 ;; on the values channel: transforms see them, puts never consume them.
 
 (require racket/match
-         "rope-core.rkt"
-         (submod "rope-core.rkt" experimental)                ; frame-guide*, multisect*
-         "summaries/lisp-summary.rkt"                         ; lisp-smr, class-sides
-         (submod "summaries/lisp-summary.rkt" experimental)   ; lisp-runs-guide*
-         "zipper-core.rkt"                                    ; the machine; zipper-focus widened below
-         "helper-algebras.rkt")                               ; opt, arg
+         "../rope-core.rkt"
+         (submod "../rope-core.rkt" experimental)                ; frame-guide*, multisect*
+         "../summaries/lisp-summary.rkt"                         ; lisp-smr, class-sides
+         (submod "../summaries/lisp-summary.rkt" experimental)   ; lisp-runs-guide*
+         "../zipper-core.rkt"                                    ; the machine; zipper-focus widened below
+         "../toolbox/main.rkt")                               ; opt, arg
 
 (provide label labeled-run split-runs label-runs typed-runs
          lisp-runs-guide* multisect*                          ; the splitter, usable bare
          (rename-out [zipper-focus* zipper-focus]             ; the indexed focus, as default
                      [zipper-guide* zipper-guide])            ; the indexed guide list, ditto
-         (except-out (all-from-out "zipper-core.rkt") zipper-focus zipper-guide)
-         (all-from-out "summaries/lisp-summary.rkt")
-         (all-from-out "rope-core.rkt"))
+         (except-out (all-from-out "../zipper-core.rkt") zipper-focus zipper-guide)
+         (all-from-out "../summaries/lisp-summary.rkt")
+         (all-from-out "../rope-core.rkt"))
 
 ;; ---------- label: judge one contiguous run in context ----------
 ;; The scalar head-triple judge: bs/as summaries, fr a rope/string/value (coerced).
@@ -113,7 +113,7 @@
 ;; ============================================================================
 (module+ test
   (require rackunit racket/format
-           "summaries/summaries.rkt")                         ; bundle, char-smr
+           "../summaries/summaries.rkt")                         ; bundle, char-smr
   (define bsmr (bundle lisp-smr char-smr))
   (define ((char-at n) L R) (let ([c (char-smr L)]) (cond [(< c n) 1] [(> c n) -1] [else 0])))
   (define (cursor rope i j)

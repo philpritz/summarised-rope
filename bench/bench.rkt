@@ -62,8 +62,8 @@
 ;;   nav,sexp -- install a midpoint cursor (sexp summary)   (expect ~flat / log)
 ;; Inputs are built in `gen` (untimed); only the op is timed.
 (module+ main
-  (require "../sexp-edit.rkt"            ; re-exports rope-core, zipper-core, summaries
-           (submod "../sexp-edit.rkt" gen) ; gen:shape gen:populate tree->text
+  (require "../text-edit/sexp-edit.rkt"            ; re-exports rope-core, zipper-core, summaries
+           (submod "../text-edit/sexp-edit.rkt" gen) ; gen:shape gen:populate tree->text
            rackcheck)                     ; gen:resize gen:bind sample
   (define sum (make-summary string-length +))
   (define (fmt x) (~r x #:precision '(= 4) #:min-width 10))
@@ -98,7 +98,7 @@
   ;; (The char guide lives in zipper-core's test module, so reproduce it here.)
   (define ((at n) L R) (cond [(< L n) 1] [(> L n) -1] [else 0]))
   (define (gap n) (vector (at n) (at n)))
-  (define (install p) ((setter zipper-guide (cdr p)) (car p)))   ; (zipper . guide-vec) -> navigate
+  (define (install p) (((opt-set zipper-guide) (cdr p)) (car p)))   ; (zipper . guide-vec) -> navigate
   (table "nav,char: install midpoint gap, n-char rope        -- expect ~flat (log)"
          (bench install
                 (lambda (n) (let ([g (gap (quotient n 2))])
@@ -194,7 +194,7 @@
     (define target (list (quotient forms 2)))         ; the middle top-level form
     (define counter (box 0))
     (define gs (counting (sexp-guides target) counter))
-    ((setter zipper-guide gs) (start sexp-smr r gs))         ; navigate, tallying guide calls
+    (((opt-set zipper-guide) gs) (start sexp-smr r gs))      ; navigate, tallying guide calls
     (printf "~a  ~a  ~a  ~a\n"
             (~a d #:min-width 6)
             (~a (string-length (number->string forms)) #:min-width 14)

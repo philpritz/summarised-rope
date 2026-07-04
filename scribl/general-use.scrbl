@@ -3,7 +3,7 @@
           (for-label racket))
 
 @(define ev (make-base-eval))
-@examples[#:eval ev #:hidden (require "sexp-edit.rkt" racket/format)]
+@examples[#:eval ev #:hidden (require "../text-edit/sexp-edit.rkt" racket/format)]
 
 @title{Editing s-expressions}
 

@@ -6,12 +6,12 @@
 ;; focus become one focus to view/edit through the value-stream optics (list-of, lref, ...).
 ;; Built on summaries.rkt's linecol metric and the experimental multisect*/newline-guide*.
 
-(require "rope-core.rkt"
-         (submod "rope-core.rkt" experimental)              ; multisect*
-         "summaries/summaries.rkt"                           ; linecol-smr
-         (submod "summaries/summaries.rkt" experimental)     ; newline-guide*
-         "helper-algebras.rkt"                               ; iso, iso->lens
-         "zipper-core.rkt")                                  ; zipper-focus
+(require "../rope-core.rkt"
+         (submod "../rope-core.rkt" experimental)              ; multisect*
+         "../summaries/summaries.rkt"                           ; linecol-smr
+         (submod "../summaries/summaries.rkt" experimental)     ; newline-guide*
+         "../toolbox/main.rkt"                               ; iso, iso->opt
+         "../zipper-core.rkt")                                  ; zipper-focus
 
 (provide lines-iso focus-lines)
 
@@ -19,4 +19,4 @@
 (define lines-iso (iso (multisect* newline-guide*) (curry apply (make-rope linecol-smr))))
 
 ;; split the cursor's focus into its lines (one focus = the list of line ropes).
-(define focus-lines (compose zipper-focus (iso->lens lines-iso)))
+(define focus-lines (compose-opt zipper-focus (iso->opt lines-iso)))

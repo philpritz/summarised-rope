@@ -1,8 +1,8 @@
 #lang scribble/manual
 
 @(require (for-label racket
-                     "../lisp-edit.rkt"
-                     "../helper-algebras.rkt"))
+                     "../text-edit/lisp-edit.rkt"
+                     "../toolbox/algebra.rkt"))
 
 @title{lisp-edit}
 
@@ -28,7 +28,7 @@ aligned by edge. Both puts are zipper-core's own objects: the widening is get-si
 only, every write path unchanged. Contexts are read-only by protocol --- the puts
 consume the focal value alone.
 
-Composed with the row lifts (helper-algebras):
+Composed with the row lifts (algebra):
 @racket[(compose-opt zipper-guide (opt-lref 0 focal))] is edge 0's guide with its
 cut in view; @racket[(opt-ldiag 1 focal)] as the inner stage collapses the cursor
 onto edge 1.

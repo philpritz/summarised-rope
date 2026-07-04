@@ -4,20 +4,20 @@
           racket/sandbox
           racket/runtime-path
           (for-label racket
-                     "../helper-algebras.rkt"))
+                     "../toolbox/algebra.rkt"))
 
 @; A trusted sandbox so the example evaluator may require the local module
 @; (the default sandbox blocks reading files outside collects).
-@(define-runtime-path helper-algebras-path "../helper-algebras.rkt")
+@(define-runtime-path algebra-path "../toolbox/algebra.rkt")
 @(define ev
    (call-with-trusted-sandbox-configuration
     (lambda ()
       (define e (make-base-eval))
       (e `(require racket/list
-                   (file ,(path->string helper-algebras-path))))
+                   (file ,(path->string algebra-path))))
       e)))
 
-@title{helper-algebras}
+@title{algebra}
 
 The project's small algebraic helpers --- the canonical home other files point to.
 Two families: the @bold{iso} (a reversible function, @racket[iso] / @racket[compose-iso]

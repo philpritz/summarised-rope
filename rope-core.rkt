@@ -1,7 +1,7 @@
 #lang racket
 
 (require racket/generic
-         (only-in "helper-algebras.rkt" on variadic spread))
+         (only-in "toolbox/main.rkt" on variadic spread))
 
 ;; Summarised rope: a persistent rope caching a user-defined summary at every node.
 ;; Three factories make the surface:
@@ -42,7 +42,8 @@
 (define max-leaf 32)
 
 (define-generics summary-part
-  (part->summary summary-part smr))
+  (part->summary summary-part smr [fail]))   ; fail: hash-ref's convention -- a value,
+                                             ;   or a thunk to call; absent = error
 
 (define (make-summary string-summary combine)
   (define id (string-summary ""))

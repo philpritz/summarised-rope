@@ -23,14 +23,22 @@
 ;; c's slot via gen:summary-part. A MACRO so it can capture component source names (the
 ;; identifiers passed in) for display in bundle-write.
 
-(struct bundle-val (slots names)        ; slots : #hasheq(smr -> value) ; names : #hasheq(smr -> symbol), display-only
+(struct bundle-val (owner slots names)  ; owner : thunk of the bundle smr that built this value
+                                        ; slots : #hasheq(smr -> value) ; names : #hasheq(smr -> symbol), display-only
   #:transparent
   #:property prop:custom-write (lambda (bv port mode) (bundle-write bv port))
   #:methods gen:summary-part
-  [(define (part->summary bv smr)
-     (if (hash-has-key? (bundle-val-slots bv) smr)
-         (hash-ref (bundle-val-slots bv) smr)
-         bv))])
+  [(define (part->summary bv smr [fail (lambda ()
+                                          (error 'part->summary "no ~a slot in ~v"
+                                                 (object-name smr) bv))])
+     ;; three askers: a component (its slot -- has-key?, because #f is a legitimate
+     ;; slot value, e.g. word-smr of ""), the OWNING bundle (pass through, its combine
+     ;; extracts componentwise), anything else (fail -- hash-ref's convention).
+     (define slots (bundle-val-slots bv))
+     (cond [(hash-has-key? slots smr)         (hash-ref slots smr)]
+           [(eq? smr ((bundle-val-owner bv))) bv]
+           [(procedure? fail)                 (fail)]
+           [else                              fail]))])
 
 (define (bundle-write bv port)
   (define names (bundle-val-names bv))
@@ -47,9 +55,15 @@
 (define (make-bundle named)             ; named : (listof (cons smr name|#f))
   (define components (map car named))
   (define names (for/hasheq ([p (in-list named)] #:when (cdr p)) (values (car p) (cdr p))))
-  (make-summary
-   (lambda (str) (bundle-val (for/hasheq ([c (in-list components)]) (values c (c str))) names))
-   (lambda (a b)  (bundle-val (for/hasheq ([c (in-list components)]) (values c (c a b))) names))))
+  ;; owner is a thunk (one closure, shared by every value): make-summary calls the
+  ;; leaf on "" DURING construction -- before smr is bound -- so the value can only
+  ;; reference its bundle through a deferral; letrec resolves it by first call.
+  (define (owner) smr)
+  (define smr
+    (make-summary
+     (lambda (str) (bundle-val owner (for/hasheq ([c (in-list components)]) (values c (c str))) names))
+     (lambda (a b)  (bundle-val owner (for/hasheq ([c (in-list components)]) (values c (c a b))) names))))
+  smr)
 
 (define-syntax (bundle stx)
   (syntax-case stx ()
@@ -112,9 +126,11 @@
   (define newline-guide*
     (make-guide* linecol-smr
       (lambda (bs fsl fsr as)
-        (values (> (inner-cuts fsl) 0)   ; left?  -- a cut inside the left child
-                (ends-nl? fsl)            ; mid?   -- seam sits right after a newline
-                (> (inner-cuts fsr) 0))))); right? -- a cut inside the right child
+        (define l (linecol-smr fsl))      ; normalize (bundle -> slot), as
+        (define r (linecol-smr fsr))      ;   lisp-runs-guide* does
+        (values (> (inner-cuts l) 0)      ; left?  -- a cut inside the left child
+                (ends-nl? l)              ; mid?   -- seam sits right after a newline
+                (> (inner-cuts r) 0)))))  ; right? -- a cut inside the right child
 
   (module+ test
     (require rackunit)
@@ -137,6 +153,25 @@
     (check-equal? (sexp-smr (b "(aa bb")) (sexp-smr "(aa bb"))
     (check-equal? (cc (b "(aa bb")) 6)
     (check-equal? (b "(aa" " bb") (b "(aa bb")))
+
+  ;; --- part->summary: the three askers ---
+  (let* ([cc  (make-summary string-length +)]
+         [b   (bundle word-smr cc)]
+         [big (bundle word-smr cc linecol-smr)]
+         [v   (b "one two")])
+    ;; a component: its slot -- including a #f-valued one (word-smr of "" is #f)
+    (check-equal? (cc v) 7)
+    (check-false  (word-smr (b "")))
+    ;; the OWNING bundle: passes through -- normalization and self-combining work
+    (check-equal? (b v) v)
+    (check-equal? (b v (b " three")) (b "one two three"))
+    ;; anything else fails: a foreign leaf smr, and a SUB-bundle of a bigger value
+    ;; (projection is no longer silent -- ask with the value's own algebra)
+    (check-exn #rx"no .* slot" (lambda () (linecol-smr v)))
+    (check-exn #rx"no .* slot" (lambda () (b (big "one two"))))
+    ;; the fail argument, hash-ref's convention: a value, or a thunk to call
+    (check-equal? (part->summary v linecol-smr 'absent) 'absent)
+    (check-equal? (part->summary v linecol-smr (lambda () 'computed)) 'computed))
 
   (check-equal? (char-smr "hello") 5)
   (define (count-where pred)

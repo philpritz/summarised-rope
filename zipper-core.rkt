@@ -3,30 +3,30 @@
 ;; Zipper: structured navigation + editing over a summarised rope, as a stack machine.
 ;; A cursor is two guides, start gs + end ge (gap = gs=ge, seg = gs<ge); the surface:
 ;;   start         smr rope gs ge -> zipper      -- whole rope as focus, cursor installed
-;;   zipper-guide  lens onto the cursor as the list (gs ge)  -- moving both edges
-;;   zipper-edge   (zipper-edge i): lens onto edge i (0 = start, 1 = end) -- moving one
-;;   zipper-focus  lens onto the focus rope                  -- editing the content
-;;   edge-sides    (edge-sides i): lens onto edge i's summary cut as two foci L R, off a zipper
+;;   zipper-guide  opt onto the cursor as the list (gs ge)  -- moving both edges
+;;   zipper-edge   (zipper-edge i): opt onto edge i (0 = start, 1 = end) -- moving one
+;;   zipper-focus  opt onto the focus rope                  -- editing the content
+;;   edge-sides    (edge-sides i): opt onto edge i's summary cut as two foci L R, off a zipper
 ;;   to-root       fold the crumbs back -- the focus becomes the whole document
 ;;   on-edges      read the two edges as cuts, spread and combine
-;; viewer/setter/updater (helper-algebras) drive the lenses; re-exported for callers.
-;; EVERY WRITE NAVIGATES (every lens put goes through the lift); guide-AGNOSTIC. Machine,
+;; opt-get/opt-set/opt-update (algebra) drive the opts; re-exported for callers.
+;; EVERY WRITE NAVIGATES (every opt put goes through the lift); guide-AGNOSTIC. Machine,
 ;; pipeline, and the printing/lift rationale: scribble/zipper-core.scrbl.
 
 (require racket/match
          "rope-core.rkt"
-         "helper-algebras.rkt")
+         "toolbox/main.rkt")
 
 (provide
  (contract-out
   [start        (-> smr/c rope? guide/c guide/c zipper?)]
   [to-root      cmd/c]
-  [zipper-guide lens/c]
-  [zipper-edge  (-> (or/c 0 1) lens/c)]
-  [zipper-focus lens/c]
-  [edge-sides   (-> (or/c 0 1) lens/c)]
+  [zipper-guide opt/c]
+  [zipper-edge  (-> (or/c 0 1) opt/c)]
+  [zipper-focus opt/c]
+  [edge-sides   (-> (or/c 0 1) opt/c)]
   [on-edges     (-> binop/c binop/c binop/c (-> zipper? any))])
- viewer setter updater)                ; the lens ops (helper-algebras), re-exported for callers
+ opt-get opt-set opt-update compose-opt)   ; the opt ops (algebra), re-exported for callers
 
 ;; dev tooling -- NOT the navigation/editing API; reach via (require (submod "zipper-core.rkt" internal)).
 ;; run-chain's contract guards direct calls only; chain's expansion stays module-internal.
@@ -111,8 +111,7 @@
                                        ; is called (rope-core's multisect)
 (define cmd/c        (-> zipper? zipper?))
 (define binop/c      (procedure-arity-includes/c 2))
-;; just procedure? -- a lens's functor structure isn't a flat contract (see scribble Internals).
-(define lens/c       procedure?)
+(define opt/c        opt?)
 
 ;; start: a fresh zipper -- whole rope as focus, cursor installed but not yet navigated.
 (define (start smr rope gs ge) (zipper smr gs ge (head (smr "") rope (smr "")) '()))
@@ -125,52 +124,52 @@
           (map (pass smr gs ge) (cons navigate ops)))   ; pass threads each op the (smr gs ge)
    h k))
 
-;; zipper-guide: the lens onto the cursor as the guide list (list gs ge) -- a SINGLE focus (the
+;; zipper-guide: the opt onto the cursor as the guide list (list gs ge) -- a SINGLE focus (the
 ;; list); the put installs both guides and re-navigates. sexp-edit's verbs ride it via list-of/lref.
 (define zipper-guide
-  (make-lens (lambda (z)
+  (opt-from-peek (lambda (z)
              (match-define (zipper smr gs ge h k) z)
              (values (lambda (p) ((zipper-lift) (zipper smr (first p) (second p) h k)))
                      (list gs ge)))))
 
-;; zipper-edge: one lens parameterised by edge i (0 = start, 1 = end) -- the lens onto that single
+;; zipper-edge: one opt parameterised by edge i (0 = start, 1 = end) -- the opt onto that single
 ;; guide; the put installs it (the other edge untouched) and re-navigates.
 (define (zipper-edge i)
-  (make-lens (lambda (z)
+  (opt-from-peek (lambda (z)
              (match-define (zipper smr gs ge h k) z)
              (if (zero? i)
                  (values (lambda (g) ((zipper-lift) (zipper smr g  ge h k))) gs)
                  (values (lambda (g) ((zipper-lift) (zipper smr gs g  h k))) ge)))))
 
-;; zipper-head: the lens onto the machine head (before . focus . after); the put reinstalls it,
+;; zipper-head: the opt onto the machine head (before . focus . after); the put reinstalls it,
 ;; coercing the focus to a rope (smr in scope here) and re-navigating. The coercion boundary: scribble.
 (define zipper-head
-  (make-lens (lambda (z)
+  (opt-from-peek (lambda (z)
              (match-define (zipper smr gs ge h k) z)
              (values (lambda (h*)
                        (match-define (head b t a) h*)
                        ((zipper-lift) (zipper smr gs ge (head b ((make-rope smr) t) a) k)))
                      h))))
 
-;; head-focus: the lens onto a head's focus rope -- the middle of (before . focus . after); the put
+;; head-focus: the opt onto a head's focus rope -- the middle of (before . focus . after); the put
 ;; swaps the field, leaving the flanking summaries. Coercion + navigation are zipper-head's job.
 (define head-focus
-  (make-lens (lambda (h)
+  (opt-from-peek (lambda (h)
              (match-define (head b t a) h)
              (values (lambda (t*) (head b t* a)) t))))
 
-;; zipper-focus: the lens onto the focus rope, zipper-guide's twin; the put swaps in content and
-;; re-navigates, delete = (setter zipper-focus ""). Decomposition + coercion: scribble Internals.
-(define zipper-focus (compose zipper-head head-focus))
+;; zipper-focus: the opt onto the focus rope, zipper-guide's twin; the put swaps in content and
+;; re-navigates, delete = ((opt-set zipper-focus) ""). Decomposition + coercion: scribble Internals.
+(define zipper-focus (compose-opt zipper-head head-focus))
 
-;; edge-sides: lens onto edge i's summary cut as two foci L R, read off a zipper; the put writes a
-;; gap at the cut and re-navigates. Consume the view with a k receiving L R. Mechanics: scribble.
+;; edge-sides: opt onto edge i's summary cut as two foci L R, read off a zipper; the put writes a
+;; gap at the cut and re-navigates. Fold the view with (compose k (opt-get ..)), k receiving L R.
 (define (edge-sides i)
-  (make-lens
+  (opt-from-peek
    (lambda (z)
      (match-define (zipper smr _ _ (head b m a) _) z)
      (define mt ((make-rope smr) ""))
-     (define (put L R) ((setter zipper-head (head L mt R)) z))   ; gap at the cut, re-navigated
+     (define (put L R) (((opt-set zipper-head) (head L mt R)) z))   ; gap at the cut, re-navigated
      (if (zero? i)
          (values put b         (smr m a))                        ; start edge: foci L R
          (values put (smr b m) a)))))                            ; end edge:   foci L R
@@ -192,9 +191,9 @@
 ;; prints as the marked document: gap -> before‸after, seg -> before⟦focus⟧after. pieces re-cut from
 ;; the root with the guides, so it leans on the guide-focus alignment every write keeps (see scribble).
 (define (zipper-show z port)
-  (match-define (list gs ge) ((viewer zipper-guide) z))
+  (match-define (list gs ge) ((opt-get zipper-guide) z))
   (define smr  (zipper-smr z))
-  (define root ((viewer zipper-focus) (to-root z)))
+  (define root ((opt-get zipper-focus) (to-root z)))
   (let-values ([(b m a) ((multisect smr gs ge) root)])
     (if (equal? m (empty smr))
         (fprintf port "~a‸~a" b a)
@@ -220,68 +219,68 @@
   (define ((at n) L R) (cond [(< L n) 1] [(> L n) -1] [else 0]))
   (define (gap n)   (list (at n) (at n)))
   (define (seg i j) (list (at i) (at j)))
-  (define (gap? z)  (equal? ((viewer zipper-focus) z) ((make-rope cc))))
-  (define (doc z)   (~a ((viewer zipper-focus) (to-root z))))
+  (define (gap? z)  (equal? ((opt-get zipper-focus) z) ((make-rope cc))))
+  (define (doc z)   (~a ((opt-get zipper-focus) (to-root z))))
   (define (place rope p) (start cc rope (first p) (second p)))   ; place a cursor list, unnavigated
-  (define delete (setter zipper-focus ""))
+  (define delete ((opt-set zipper-focus) ""))
   (define rope ((make-rope cc) "hello world"))
   (define g0 (gap 0))
   (define z0 (place rope g0))
 
-  (check-equal? ((viewer zipper-guide) z0) g0)
+  (check-equal? ((opt-get zipper-guide) z0) g0)
   (let ([g5 (gap 5)])
-    (check-equal? ((viewer zipper-guide) ((setter zipper-guide g5) z0)) g5))
+    (check-equal? ((opt-get zipper-guide) (((opt-set zipper-guide) g5) z0)) g5))
 
-  (let ([z ((setter zipper-guide (gap 5)) z0)])
+  (let ([z (((opt-set zipper-guide) (gap 5)) z0)])
     (check-true  (gap? z))
-    (check-equal? (~a ((viewer zipper-focus) z)) "")
-    (check-equal? (doc ((setter zipper-focus "XYZ") z)) "helloXYZ world"))
+    (check-equal? (~a ((opt-get zipper-focus) z)) "")
+    (check-equal? (doc (((opt-set zipper-focus) "XYZ") z)) "helloXYZ world"))
 
-  (let ([z ((setter zipper-guide (seg 0 5)) z0)])
+  (let ([z (((opt-set zipper-guide) (seg 0 5)) z0)])
     (check-false (gap? z))
-    (check-equal? (~a ((viewer zipper-focus) z)) "hello")
-    (let ([z* ((setter zipper-focus "HI") z)])
-      (check-equal? (~a ((viewer zipper-focus) z*)) "HI wo")
+    (check-equal? (~a ((opt-get zipper-focus) z)) "hello")
+    (let ([z* (((opt-set zipper-focus) "HI") z)])
+      (check-equal? (~a ((opt-get zipper-focus) z*)) "HI wo")
       (check-equal? (doc z*) "HI world"))
     (check-equal? (doc (delete z)) " world"))
 
-  (let* ([z  ((setter zipper-guide (seg 0 5)) z0)]
-         [z* ((setter (zipper-edge 1) (at 11)) z)])           ; move just the end edge to 11
-    (check-equal? (~a ((viewer zipper-focus) z*)) "hello world"))
+  (let* ([z  (((opt-set zipper-guide) (seg 0 5)) z0)]
+         [z* (((opt-set (zipper-edge 1)) (at 11)) z)])        ; move just the end edge to 11
+    (check-equal? (~a ((opt-get zipper-focus) z*)) "hello world"))
 
-  ;; edge-sides reads edge i's cut as two foci L R straight off the zipper, and the viewer
-  ;; continuation receives them (k = list collects, a 2-arg k picks). (zipper-head still drives it,
-  ;; internally -- not exported.)
-  (let ([z ((setter zipper-guide (seg 0 5)) z0)])             ; focus "hello", before "", after " world"
-    (check-equal? (~a (head-rope ((viewer zipper-head) z))) "hello")          ; zipper-head: internal, white-box
-    (check-equal? ((viewer (edge-sides 0) list) z) '(0 11))   ; start: 0 | "hello world"
-    (check-equal? ((viewer (edge-sides 1) list) z) '(5 6))    ; end:   "hello" | "world"
-    (check-equal? ((viewer (edge-sides 0) (lambda (L R) L)) z) 0)             ; k receives L R -> L
-    (check-equal? ((viewer (edge-sides 1) (lambda (L R) R)) z) 6))
+  ;; edge-sides reads edge i's cut as two foci L R straight off the zipper; fold the view
+  ;; with (compose k (opt-get ..)) -- k = list collects, a 2-arg k picks. (zipper-head still
+  ;; drives it, internally -- not exported.)
+  (let ([z (((opt-set zipper-guide) (seg 0 5)) z0)])          ; focus "hello", before "", after " world"
+    (check-equal? (~a (head-rope ((opt-get zipper-head) z))) "hello")         ; zipper-head: internal, white-box
+    (check-equal? ((compose list (opt-get (edge-sides 0))) z) '(0 11))   ; start: 0 | "hello world"
+    (check-equal? ((compose list (opt-get (edge-sides 1))) z) '(5 6))    ; end:   "hello" | "world"
+    (check-equal? ((compose (lambda (L R) L) (opt-get (edge-sides 0))) z) 0)  ; k receives L R -> L
+    (check-equal? ((compose (lambda (L R) R) (opt-get (edge-sides 1))) z) 6))
 
-  (let ([z ((setter zipper-guide (seg 6 11)) z0)])
-    (check-equal? (~a ((viewer zipper-focus) z)) "world")
-    (check-equal? (doc ((updater zipper-focus (lambda (m) ((make-rope cc) "[" m "]"))) z)) "hello [world]"))
+  (let ([z (((opt-set zipper-guide) (seg 6 11)) z0)])
+    (check-equal? (~a ((opt-get zipper-focus) z)) "world")
+    (check-equal? (doc ((opt-update zipper-focus (lambda (m) ((make-rope cc) "[" m "]"))) z)) "hello [world]"))
 
-  (check-equal? (~a ((viewer zipper-focus) ((compose to-root
-                                                     (setter zipper-focus "HI")
-                                                     (setter zipper-guide (seg 0 5))) z0)))
+  (check-equal? (~a ((opt-get zipper-focus) ((compose to-root
+                                                      ((opt-set zipper-focus) "HI")
+                                                      ((opt-set zipper-guide) (seg 0 5))) z0)))
                 "HI world")
 
-  (let ([z ((setter zipper-guide (seg 6 11)) z0)])
+  (let ([z (((opt-set zipper-guide) (seg 6 11)) z0)])
     (check-equal? ((on-edges list list list) z) '((6 5) (11 0)))
     (check-equal? ((on-edges + - -) z) (+ (- 6 5) (- 11 0))))
-  (let ([z ((setter zipper-guide (gap 5)) z0)])
+  (let ([z (((opt-set zipper-guide) (gap 5)) z0)])
     (check-equal? ((on-edges list list list) z) '((5 6) (5 6))))
 
-  (check-equal? (~a ((setter zipper-guide (gap 5)) z0)) "hello‸ world")
-  (check-equal? (~a ((setter zipper-guide (seg 0 5)) z0)) "⟦hello⟧ world")
+  (check-equal? (~a (((opt-set zipper-guide) (gap 5)) z0)) "hello‸ world")
+  (check-equal? (~a (((opt-set zipper-guide) (seg 0 5)) z0)) "⟦hello⟧ world")
   (check-equal? (~a z0) "‸hello world")
-  (check-equal? (~a ((setter zipper-focus "HI") ((setter zipper-guide (seg 0 5)) z0)))
+  (check-equal? (~a (((opt-set zipper-focus) "HI") (((opt-set zipper-guide) (seg 0 5)) z0)))
                 "⟦HI wo⟧rld")
-  (let ([z ((setter zipper-guide (gap 6)) (place ((make-rope cc) "ab\ncd\nef") (gap 0)))])
+  (let ([z (((opt-set zipper-guide) (gap 6)) (place ((make-rope cc) "ab\ncd\nef") (gap 0)))])
     (check-equal? (~a z) "ab\ncd\n‸ef"))
 
-  (check-exn #rx"crossed cursor" (lambda () ((setter zipper-guide (seg 5 2)) z0)))
-  (check-not-exn (lambda () ((setter zipper-guide (gap 5)) z0)))
-  (check-not-exn (lambda () ((setter zipper-guide (seg 2 5)) z0))))
+  (check-exn #rx"crossed cursor" (lambda () (((opt-set zipper-guide) (seg 5 2)) z0)))
+  (check-not-exn (lambda () (((opt-set zipper-guide) (gap 5)) z0)))
+  (check-not-exn (lambda () (((opt-set zipper-guide) (seg 2 5)) z0))))

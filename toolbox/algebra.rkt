@@ -5,10 +5,11 @@
 ;; point to; the provide list is the surface map). Intended as a reusable helper
 ;; library, so some surface is built out past what this project strictly needs.
 ;; Narrative -- the iso group law, the optic protocol, the inlining rationale -- in
-;; scribble/helper-algebras.scrbl (pre-dates the lens->opt replacement; the van
+;; scribble/algebra.scrbl (pre-dates the lens->opt replacement; the van
 ;; Laarhoven generation is archived in deprecated/deprecated-7).
 
 (provide (struct-out iso)        ; (iso to from); callable = applies `to`
+         inverse-iso             ; the (from, to) swap -- (inverse-iso (iso f g)) = (iso g f)
          compose-iso             ; compose any number of isos; inverses reversed
          expt-iso                ; integer powers of an iso (scmutils function arithmetic)
          iso-law? check-iso-laws ; round-trip predicate; the inputs that fail it
@@ -25,6 +26,8 @@
                                  ;   signature-transparent (put returns P's output, listified)
          opt-list                ; the elementwise lift: P at EVERY index, all components listified
          focal                   ; the first-value-focal row policy (rest = read-only ctx)
+         attach-viewer           ; join a viewer (a pure render over the view) onto an opt;
+                                 ;   the render rides LAST, read-only -- the put is untouched
          varg                    ; rearrange the value stream by position
          vdiag                   ; the value-stream diagonal -- view i, put broadcasts to all (ldiag on values)
          pure                    ; (pure v ...): the constant fn, ignoring its args and returning the v ... as values (K)
@@ -35,6 +38,7 @@
          spread                  ; apply each fn to its own arg, combine with h
          variadic                ; lift a binary op + seed to a variadic left fold
          fixed                   ; iterate to a fixed point
+         scanl scanr             ; every intermediate fold value, seed included (length n+1)
          lexicographic)          ; first-difference 3-way order on sequences
 
 ;; A focused (to, from) pair; prop:procedure runs `to`, so an iso is callable as its
@@ -42,7 +46,7 @@
 (struct iso (to from)
   #:property prop:procedure (struct-field-index to))
 
-(define (inverse i) (iso (iso-from i) (iso-to i)))
+(define (inverse-iso i) (iso (iso-from i) (iso-to i)))
 
 ;; Compose isos; the composite inverts the halves in reverse. (compose-iso) = identity.
 (define (compose-iso . is)
@@ -50,12 +54,12 @@
        (apply compose (map iso-from (reverse is)))))
 
 ;; Integer powers of an iso, in the style of scmutils function arithmetic: n<0 uses
-;; the inverse, so (expt-iso i -1) = (inverse i). Closed on isos.
+;; the inverse, so (expt-iso i -1) = (inverse-iso i). Closed on isos.
 (define (expt-iso i n)
-  (cond [(negative? n) (expt-iso (inverse i) (- n))]
+  (cond [(negative? n) (expt-iso (inverse-iso i) (- n))]
         [else (for/fold ([acc (iso values values)]) ([_ (in-range n)]) (compose-iso i acc))]))
 
-(define (iso-law? i x) (equal? ((compose-iso (inverse i) i) x) x))   ; x round-trips unchanged
+(define (iso-law? i x) (equal? ((compose-iso (inverse-iso i) i) x) x))   ; x round-trips unchanged
 (define (check-iso-laws i xs) (filter (lambda (x) (not (iso-law? i x))) xs))   ; '() = genuine iso
 
 ;; opt: an optic as a plain record -- three fields, one protocol over the values channel:
@@ -192,6 +196,20 @@
 ;; in view" -- the common companion to the widened zipper optics.
 (define focal (opt values (lambda (x) (lambda (v . _) x)) (lambda (v . _) v)))
 
+;; attach-viewer: join a VIEWER -- a pure function over an opt's view values (a
+;; render; no put half) -- onto an opt. The rendering rides LAST on the values
+;; channel as read-only context; the put is o's own, and the default transform
+;; sheds the rendering before delegating, so a bare run of the attached opt is a
+;; bare run of o. An installed transform sees the full widened stream and returns
+;; what o's set consumes. (opt-get o) is the opt->viewer coercion, `compose` the
+;; viewer composition -- a viewer is a role, not a type.
+(define (attach-viewer o viewer)
+  (opt (lambda ws
+         (define vs (call-with-values (lambda () (apply (opt-get o) ws)) list))
+         (apply values (append vs (list (apply viewer vs)))))
+       (opt-set o)
+       (lambda all (apply (opt-f o) (drop-right all 1)))))
+
 ;; varg: the opt twin of `arg` -- focus the values at positions `is`, in order; the put
 ;; writes them back. Lawful for distinct positions; a repeated position is a lossy
 ;; diagonal (put-get fails).
@@ -287,6 +305,17 @@
     [(a b c d) (fixed-case a b c d)]
     [xs        (rest-loop xs)]))
 
+;; scanl / scanr: every intermediate value of the corresponding fold, seed included --
+;; length n+1, the seed at its own end. One pass each, allocating exactly the result
+;; cells: scanl emits the running prefix as it recurses ((f acc x), acc-first, as
+;; foldl-shaped accumulation reads); scanr conses (f x suffix) onto the scan of the
+;; rest, whose head IS the running suffix.
+(define (scanl f z xs)
+  (cons z (if (null? xs) '() (scanl f (f z (car xs)) (cdr xs)))))
+
+(define (scanr f z xs)
+  (foldr (lambda (x acc) (cons (f x (car acc)) acc)) (list z) xs))
+
 ;; lexicographic: lift an element comparison `cmp` (-> {-1,0,1}) to a 3-way order on
 ;; sequences -- first non-zero verdict decides; a prefix precedes its extension.
 (define ((lexicographic cmp) xs ys)
@@ -351,7 +380,7 @@
 (define (lockstep-off x) (if (steps? x) (steps (steps-fs x) 'off (steps-trusted x)) x))
 
 ;; ========== EXPERIMENTAL: curried lambda =======================================
-;; Provisional, opt-in: (require (submod "helper-algebras.rkt" experimental)).
+;; Provisional, opt-in: (require (submod "algebra.rkt" experimental)).
 ;; Shadows `lambda` so a parenthesised binder HEAD desugars to a curried lambda,
 ;; one level per nesting, to any depth:
 ;;   (lambda ((x w) y) e)   = (lambda (x w) (lambda (y) e))     ; multi-arg stages
@@ -396,7 +425,7 @@
     (check-equal? ((lambda (x [y 10]) (+ x y)) 5) 15)))                  ; optional arg, untouched
 
 ;; ========== EXPERIMENTAL: church-apply =========================================
-;; Provisional, opt-in: (require (submod "helper-algebras.rkt" experimental)).
+;; Provisional, opt-in: (require (submod "algebra.rkt" experimental)).
 ;; apply's shape, but the result is CHURCH-ENCODED multiple values: call f on the
 ;; args and reify its (values ...) as a function awaiting a consumer k:
 ;;   ((church-apply f a ...) k) = (call-with-values (%lambda () (f a ...)) k)
@@ -423,7 +452,7 @@
 
   ;; --- applying an iso runs its forward side; `inverse` runs the other ---
   (check-equal? (inc 10) 11)
-  (check-equal? ((inverse inc) 11) 10)
+  (check-equal? ((inverse-iso inc) 11) 10)
 
   ;; --- integer powers, closed on isos ---
   (check-equal? ((expt-iso inc 3) 10) 13)         ; forward thrice
@@ -431,20 +460,20 @@
   (check-equal? ((expt-iso inc 0) 99) 99)         ; n = 0 is the identity iso
 
   ;; --- the result is still an iso: invert it, re-exponentiate it ---
-  (check-equal? ((inverse (expt-iso inc 3)) 13) 10)
+  (check-equal? ((inverse-iso (expt-iso inc 3)) 13) 10)
 
   ;; --- compose-iso is variadic: any number of isos, inverses reversed ---
   (check-equal? ((compose-iso inc inc inc) 10) 13)          ; three composed, forward
-  (check-equal? ((inverse (compose-iso inc inc inc)) 13) 10)
+  (check-equal? ((inverse-iso (compose-iso inc inc inc)) 13) 10)
   (check-equal? ((compose-iso) 42) 42)                      ; no isos = the identity iso
 
   ;; --- the identities that closure buys ---
   (define i (iso (lambda (x) (* 2 x)) (lambda (x) (/ x 2))))
   ;; inverse and power commute
-  (check-equal? ((inverse (expt-iso i 4)) 48)
+  (check-equal? ((inverse-iso (expt-iso i 4)) 48)
                 ((expt-iso i -4) 48))
   ;; expt -1 = inverse  (the generic-arithmetic identity, inside the type)
-  (check-equal? ((expt-iso i -1) 6) ((inverse i) 6))
+  (check-equal? ((expt-iso i -1) 6) ((inverse-iso i) 6))
   ;; (i^m)^n = i^(m*n)
   (check-equal? ((expt-iso (expt-iso i 2) 3) 5)
                 ((expt-iso i 6) 5))
@@ -501,6 +530,17 @@
   ;; non-monoidal op: seed and order matter, the inline paths still agree with foldl
   (check-equal? ((variadic - 0) 5 3) (foldl (lambda (x acc) (- acc x)) 0 '(5 3)))
   (check-equal? ((variadic cons '()) 1 2 3) '(((() . 1) . 2) . 3))
+
+  ;; --- scanl / scanr: the fold's intermediate values, seed at its own end ---
+  (check-equal? (scanl + 0 '(1 2 3)) '(0 1 3 6))
+  (check-equal? (scanr + 0 '(1 2 3)) '(6 5 3 0))
+  (check-equal? (scanl + 0 '()) '(0))                              ; empty: just the seed
+  (check-equal? (scanr + 0 '()) '(0))
+  (check-equal? (scanl cons 'z '(a b)) '(z (z . a) ((z . a) . b))) ; arg order: (f acc x)
+  (check-equal? (scanr cons 'z '(a b)) '((a b . z) (b . z) z))     ; arg order: (f x acc)
+  ;; the last/first entry IS the full fold (non-commutative op pins the shape)
+  (check-equal? (last  (scanl - 10 '(1 2 3))) (foldl (lambda (x a) (- a x)) 10 '(1 2 3)))
+  (check-equal? (first (scanr - 10 '(1 2 3))) (foldr - 10 '(1 2 3)))
 
   ;; --- fixed: single value, multiple values, and a key projection ---
   (check-equal? ((fixed (lambda (n) (quotient n 2))) 100) 0)        ; halve to the fixpoint 0
@@ -600,6 +640,18 @@
                 '(1 2))                                           ; per-element: write ctx into focal
   ;; bare run = P's bare run, elementwise (the lifted default transform)
   (check-equal? ((opt-list focal) '(a b) '(1 2)) '(a b))
+
+  ;; --- attach-viewer: the render rides last, the put untouched ---
+  (define shown (attach-viewer fst-opt ~a))                     ; render the head as a string
+  (check-equal? (vlist shown '(1 2)) '(1 "1"))                  ; view widened by the render
+  (check-equal? (((opt-set shown) 9) '(1 2)) '(9 2))            ; put = fst-opt's own
+  (check-equal? (shown '(1 2)) '(1 2))                          ; bare run = o's bare run
+  (check-equal? ((opt-update shown (lambda (v r) (string-length r))) '(10 2))
+                '(2 2))                                          ; a transform sees the render
+  ;; a multi-value view: the render folds the whole stream, set stays the policy's
+  (define row+ (attach-viewer (opt-lref 1 focal) list))
+  (check-equal? (vlist row+ '(a b c) '(x y z)) '(b y (b y)))
+  (check-equal? (((opt-set row+) 'B) '(a b c) '(x y z)) '(a B c))
 
   ;; vdiag: ldiag on the value stream -- view value i, the put broadcasts to every position
   (check-equal? ((opt-get (vdiag 0)) 'a 'b 'c) 'a)

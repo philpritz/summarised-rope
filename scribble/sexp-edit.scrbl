@@ -7,7 +7,7 @@
                      "../rope-core.rkt"
                      "../summaries/sexp-summary.rkt"
                      "../zipper-core.rkt"
-                     "../sexp-edit.rkt"))
+                     "../text-edit/sexp-edit.rkt"))
 
 @; A trusted sandbox so the example evaluator may require the local modules (the
 @; default sandbox blocks reading files outside collects). rope-core supplies
@@ -16,7 +16,7 @@
 @(define-runtime-path rope-core-path "../rope-core.rkt")
 @(define-runtime-path sexp-summary-path "../summaries/sexp-summary.rkt")
 @(define-runtime-path zipper-core-path "../zipper-core.rkt")
-@(define-runtime-path sexp-edit-path "../sexp-edit.rkt")
+@(define-runtime-path sexp-edit-path "../text-edit/sexp-edit.rkt")
 @(define ev
    (call-with-trusted-sandbox-configuration
     (lambda ()
@@ -286,7 +286,7 @@ completion (a frame counts at its closer, not its opener; see the @tt{sexp-summa
 docs). Under that counting an open frame's interior is a @emph{prefix extension} of the
 frame's own start slot, so a shorter spine sorts before a deeper one --- a bare spine
 sits before everything deeper inside it. That ordering rule is the early exit in
-@racket[lexicographic] (@tt{helper-algebras.rkt}) and replaced an earlier
+@racket[lexicographic] (@tt{algebra.rkt}) and replaced an earlier
 @racket[-inf] padding scheme.
 
 Because each component carries its own family tag, all-left, all-right, and mixed
@@ -298,7 +298,7 @@ as the index it was flipped from.
 
 The command verbs ride @racket[idxs] --- @racket[(compose zipper-guide (list-of
 index-of))], the lens from a zipper to its index list @racket[(ix0 ix1)] --- then choose
-a reach with a selector lens at the tail (all from @tt{helper-algebras.rkt}):
+a reach with a selector lens at the tail (all from @tt{algebra.rkt}):
 
 @itemlist[
   @item{@racket[(ldiag i)] collapses to position @racket[i] --- the gap verbs
@@ -314,13 +314,13 @@ point-free: an ad-hoc edit threads the zipper through the composed lens in place
 rather than naming @racket[z0]/@racket[z1]/@racket[z2] intermediates --- @racket[idxs]
 and the verbs are the only standing shorthands. @racket[index-of] is the lens making a
 guide and its index interchangeable (its view is @racket[guide-index], its put
-@racket[slot-guide]); the helper internals are documented in @tt{helper-algebras.rkt}.
+@racket[slot-guide]); the helper internals are documented in @tt{algebra.rkt}.
 
 @subsection{Document isos (test scaffolding)}
 
 The @racket[test] submodule carries three genuine isos over the document's states ---
 @bold{A} shape @tt{<->} spines (structure), @bold{C} tree @tt{<->} pieces (content),
-@bold{B} pieces @tt{<->} text (text) --- checked against @tt{helper-algebras.rkt}'s
+@bold{B} pieces @tt{<->} text (text) --- checked against @tt{algebra.rkt}'s
 @racket[iso] battery. They are the free scaffolding the guide-driven bridge (spines
 locating cuts in the text) gets checked against; they are not part of the export
 surface.
