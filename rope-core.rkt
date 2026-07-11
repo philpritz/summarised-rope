@@ -15,7 +15,10 @@
 (define guide/c (-> any/c any/c (or/c -1 0 1)))
 
 (provide
- rope?
+ rope? rope-algebra                          ; the algebra a rope was BUILT with -- the
+                                             ;   wear-transparent derivation channel (a
+                                             ;   worn algebra, e.g. a memoized bundle,
+                                             ;   derives as itself; an owner thunk can't)
  gen:summary-part part->summary summary-part?
  (contract-out
   [make-summary (-> (-> string? any/c) (-> any/c any/c any/c) smr/c)]
@@ -24,7 +27,7 @@
   [frame        (-> smr/c any/c any/c (-> guide/c guide/c))]))
 
 (module+ internal
-  (provide rope-leaves rope-height
+  (provide rope-leaves rope-height rope-summary
            leaf? branch? leaf-text
            branch-left branch-right))
 
@@ -54,7 +57,11 @@
       [(? rope?)                                 (smr (rope-summary x))]
       [(? summary-part?)                         (part->summary x smr)]
       [_                                         x]))
-  (define smr (variadic (spread combine values coerce) id))
+  ;; smr folds `combine` over coerced args via `variadic`, which seeds the fold from the
+  ;; FIRST argument, not from id -- valid by the identity law (combine id x) = x. `op`
+  ;; coerces BOTH sides (was `values coerce`): the id-seed used to be what coerced the first
+  ;; argument, so with the seed gone the op must. See variadic in toolbox/algebra.rkt.
+  (define smr (variadic (spread combine coerce coerce) id))
   smr)
 
 (define ((leaf-rope smr) text)

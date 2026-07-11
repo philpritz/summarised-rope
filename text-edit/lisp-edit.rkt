@@ -49,11 +49,12 @@
 ;; flanking summaries ride behind as read-only context. The put is zipper-focus's
 ;; own -- set never sees context -- so every write path is untouched.
 (define zipper-focus*
-  (opt (lambda (z)
-         (match-define (cons bs as) ((on-edges cons (arg 0) (arg 1)) z))
-         (values ((opt-get zipper-focus) z) bs as))
-       (opt-set zipper-focus)
-       (arg 0)))
+  (opt-from-peek
+   (lambda (z)
+     (define-values (bs _r0) ((edge-view 0) z))                    ; before the focus
+     (define-values (_l1 as) ((edge-view 1) z))                    ; after the focus
+     (values (lambda (fr* . _) (((opt-set zipper-focus) fr*) z))   ; the flanks are read-only
+             ((opt-get zipper-focus) z) bs as))))
 
 ;; ---------- the indexed guide list ----------
 ;; zipper-guide, widened to view (values guides Ls Rs): the guide list stays focal;
@@ -63,13 +64,14 @@
 ;; the cuts are derived and unwritable. A transform hence maps cuts to guides --
 ;; sexp-edit's reguide as one opt-update.
 (define zipper-guide*
-  (opt (lambda (z)
-         (match-define (cons e0 e1) ((on-edges cons cons cons) z))
-         (values ((opt-get zipper-guide) z)
-                 (list (car e0) (car e1))
-                 (list (cdr e0) (cdr e1))))
-       (opt-set zipper-guide)
-       (arg 0)))
+  (opt-from-peek
+   (lambda (z)
+     (define-values (L0 R0) ((edge-view 0) z))
+     (define-values (L1 R1) ((edge-view 1) z))
+     (values (lambda (gs* . _) (((opt-set zipper-guide) gs*) z))   ; the cuts are read-only
+             ((opt-get zipper-guide) z)
+             (list L0 L1)
+             (list R0 R1)))))
 
 ;; ---------- split-runs: the head triple, pluralized ----------
 ;; world (fr bs as) -> view (values frs bss ass): the piece ROPES focal, each piece's
@@ -79,25 +81,24 @@
 ;; rope-join takes its algebra off the left operand.
 (define (split-runs smr)
   (define build (make-rope smr))
-  (opt (lambda (fr bs as)
-         (define bs* (lisp-smr bs))                           ; normalize (bundle -> slot)
-         (define as* (lisp-smr as))
-         (define frs ((multisect* (frame-guide* lisp-runs-guide* bs* as*)) fr))
-         (values frs
-                 (for/fold ([b bs*] [acc '()] #:result (reverse acc)) ([p (in-list frs)])
-                   (values (lisp-smr b p) (cons b acc)))
-                 (for/fold ([a as*] [acc '()] #:result acc) ([p (in-list (reverse frs))])
-                   (values (lisp-smr p a) (cons a acc)))))
-       (lambda (frs*) (lambda (fr bs as) (apply build frs*)))
-       (arg 0)))
+  (opt-from-peek
+   (lambda (fr bs as)
+     (define bs* (lisp-smr bs))                           ; normalize (bundle -> slot)
+     (define as* (lisp-smr as))
+     (define frs ((multisect* (frame-guide* lisp-runs-guide* bs* as*)) fr))
+     (values (lambda (frs* . _) (apply build frs*))
+             frs
+             (for/fold ([b bs*] [acc '()] #:result (reverse acc)) ([p (in-list frs)])
+               (values (lisp-smr b p) (cons b acc)))
+             (for/fold ([a as*] [acc '()] #:result acc) ([p (in-list (reverse frs))])
+               (values (lisp-smr p a) (cons a acc)))))))
 
 ;; ---------- labeled-run: ONE piece, judged in its context ----------
 ;; world (fr bs as) -> view (values fr class): the piece focal, its label behind.
 ;; The put consumes a new piece (rope or string) alone; the flanks are read-only.
 (define labeled-run
-  (opt (lambda (fr bs as) (values fr (label bs fr as)))
-       (lambda (p) (lambda (fr bs as) p))
-       (lambda (fr _l) fr)))
+  (opt-from-peek
+   (lambda (fr bs as) (values (lambda (p . _) p) fr (label bs fr as)))))
 
 ;; ---------- label-runs: judge each piece in its own context ----------
 ;; The elementwise lift of labeled-run: world (frs bss ass) -> view (values frs
@@ -182,7 +183,7 @@
     (let ([z* ((opt-update zipper-guide*
                  (lambda (gs Ls Rs) (list (car gs) (car gs)))) z)])
       (check-equal? (~a ((opt-get zipper-focus) z*)) "")
-      (check-equal? (char-smr ((on-edges (lambda (l r) l) (arg 0) (arg 0)) z*)) 5))
+      (check-equal? (char-smr ((compose (lambda (L R) L) (edge-view 0)) z*)) 5))
     ;; the row lifts ride the parallel lists: (opt-lref i focal) = edge i's guide
     ;; WITH its cut in view, the guide alone writable
     (define edge0 (compose-opt zipper-guide* (opt-lref 0 focal)))
@@ -195,7 +196,7 @@
     ;; the diagonal collapses the cursor onto edge 1, cut context in view
     (let ([z* (((opt-set (compose-opt zipper-guide* (opt-ldiag 1 focal))) (char-at 12)) z)])
       (check-equal? (~a ((opt-get zipper-focus) z*)) "")
-      (check-equal? (char-smr ((on-edges (lambda (l r) l) (arg 0) (arg 0)) z*)) 12)))
+      (check-equal? (char-smr ((compose (lambda (L R) L) (edge-view 0)) z*)) 12)))
 
   ;; --- the middle stage alone: pieces with their per-piece contexts ---
   (let ([z (cursor doc 0 (char-smr doc))])

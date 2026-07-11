@@ -11,17 +11,20 @@
 ;;   cursor sexp-guides                          -- place a cursor
 ;;   anchors reanchor cover                      -- edge i's snapped anchor (i picks side+rounding); re-anchor; cover
 ;;   reguide front-guide back-guide               -- (reguide gl gr): set each edge's guide from its cut (L R -> guide)
-;;   edge-guide edge-index                       -- opts onto one cursor edge
-;;   at move edge each both                      -- edit verbs: zipper -> zipper commands
-;; Index model, the two anchors, the lexicographic comparison, and the lens style:
-;; scribble/sexp-edit.scrbl (pre-dates the lens->opt replacement).
+;;   edge-guide edge-index                       -- STAGES onto one cursor edge (its guide / its index)
+;;   at move edge each both                      -- edit verbs: zipper -> zipper commands (parked)
+;; The guide layer rides zipper-core's STAGED (g*) optic (zipper-guide/g i): edge i's
+;; guide focal, its cut on the render bus; the anchor ops are consumers of it (enter +
+;; a (g put) handler, or stage-view / stage-update). Index model, the two anchors, the
+;; lexicographic comparison: scribble/sexp-edit.scrbl (pre-dates the staged optic).
 
 (require racket/match
          "../rope-core.rkt"        ; make-rope multisect frame
          "../summaries/sexp-summary.rkt"  ; sexp-smr, sand-spines
          "../summaries/summaries.rkt"     ; bundle
-         "../zipper-core.rkt"      ; start zipper-guide zipper-edge zipper-focus to-root on-edges
-         "../toolbox/main.rkt") ; on; lexicographic; opt-from-peek/list-of/lref/ldiag (opt vocab)
+         "../zipper-core.rkt"      ; start; zipper-guide/g zipper-focus/g edge-view to-root; the stage vocab
+         "../toolbox/main.rkt"     ; on; lexicographic; pure
+         (submod "../toolbox/algebra.rkt" experimental)) ; the curried `lambda` -- (lambda ((L R) g) ...)
 
 (provide spine-cmp              ; (spine-cmp front back index) -> -1 | 0 | 1
          slot-guide guide-index ; (slot-guide index) -> guide (carries its index)
@@ -65,7 +68,7 @@
                 (spine-cmp front back ix)))))
 
 ;; cut-index: read a sexp index straight off a cut's sides L R -- the front anchor, no guide. Fold
-;; the edge-sides view with it: ((compose cut-index (opt-get (edge-sides i))) z). (sand-spines also yields the
+;; the edge-view with it: ((compose cut-index (edge-view i)) z). (sand-spines also yields the
 ;; back anchor, which `anchors` pairs with the front; reading the front only, this drops the front/back choice.)
 (define (cut-index L R)
   (define-values (front back) ((on sand-spines sexp-smr) L R))
@@ -74,41 +77,52 @@
 ;; ---------- cursor conveniences ----------
 (define (sexp-guides s [e s]) (list (slot-guide s) (slot-guide e)))   ; the guide list (gs ge)
 (define (cursor rope s [e s])                        ; place the cursor, then navigate to it
-  (let ([p (sexp-guides s e)])
-    (((opt-set zipper-guide) p) (start sexp-smr rope (first p) (second p)))))
+  (let ([p (sexp-guides s e)])                       ; start seeds both guides; one edge-set re-navigates
+    (((stage-set (zipper-guide/g 0)) (first p))
+     (start sexp-smr rope (first p) (second p)))))
 
 ;; ============================================================================
 ;; Guides: opts & transforms -- everything that focuses the cursor's guides
 ;; or transforms their indices, gathered here.
 ;; ============================================================================
 
-;; ---------- opts onto the guides ----------
-;; `zipper-edge`/`zipper-guide` (zipper-core) focus the cursor's guides; one hop more, through
-;; `index-of`, lands on the index each carries. A write through a composite re-navigates once.
-(define index-of (opt-from-peek (lambda (g) (values slot-guide (guide-index g)))))  ; opt: a guide <-> its index
-(define (edge-guide i) (zipper-edge i))                         ; -> the guide at edge i
-(define (edge-index i) (compose-opt (zipper-edge i) index-of))  ; -> its index
-(define idxs (compose-opt zipper-guide (list-of index-of)))     ; zipper <-> (list ix0 ix1)
+;; ---------- optics onto the guides ----------
+;; The parameterized (zipper-guide/g i) (zipper-core) IS edge i's guide optic -- the
+;; guide focal, its cut (L R) on the render bus. index-of reads a guide's index; the
+;; edge index optic is the guide optic then index-of. A write through a composite
+;; re-navigates once.
+(define index-of (pure (lambda (g) (values (lambda (c) ((c) (guide-index g))) slot-guide)))) ; guide <-> index
+(define edge-guide zipper-guide/g)                            ; -> the guide at edge i (its cut on the bus)
+(define (edge-index i) (compose-stage (zipper-guide/g i) index-of))  ; -> its index
 
 ;; ---------- anchors & re-anchoring ----------
-;; edge-contexts: edge i's cut as its two side-summaries (a gap collapses both to before | after).
-(define (edge-contexts z i)               ; i: 0 = start edge, 1 = end edge
-  ((on-edges (lambda (e0 e1) (apply values (if (zero? i) e0 e1))) list list) z))
+;; edge-contexts: edge i's cut as its two side-summaries (a gap collapses both to
+;; before | after) -- zipper-core's edge-view, argument order kept.
+(define (edge-contexts z i) ((edge-view i) z))    ; i: 0 = start edge, 1 = end edge
 
-;; anchors z i -> edge i's anchor, snapped to a clean slot; the side AND rounding read off i:
+;; snap i -> edge i's anchor index, snapped to a clean slot; the side AND rounding read off i:
 ;;   i=0 (start): front head FLOORED   -> the form's start
 ;;   i=1 (end):   back  head CEILING'd -> past the form
 ;; clean integer heads are fixed points; a mid-atom/ws ½ head snaps outward, so a mid-atom
 ;; cursor brackets the atom. Why floor/ceiling, why per-i: scribble.
-(define (anchors z i)
-  (define-values (L R) (edge-contexts z i))
+(define ((snap i) L R)
   (define-values (f b) ((on sand-spines sexp-smr) L R))
   (if (zero? i)
       (cons (floor   (car f)) (cdr f))     ; start
       (cons (ceiling (car b)) (cdr f))))   ; end
 
+;; anchors: read edge i's cut off (zipper-guide/g i)'s bus, snap it -- a pure read.
+(define (anchors z i)
+  ((compose (lambda (g _put) (g (lambda ((L R) _guide) ((snap i) L R))))
+            (enter z))
+   (zipper-guide/g i)))
+
 ;; reanchor: install edge i's guide from its snapped anchor (read off the cut, re-navigates).
-(define ((reanchor i) z) (((opt-set (edge-index i)) (anchors z i)) z))
+;; The (g put) handler reads the cut (renders) and writes the snapped guide (put), one pass.
+(define ((reanchor i) z)
+  ((compose (lambda (g put) (g (lambda ((L R) _guide) (put (slot-guide ((snap i) L R))))))
+            (enter z))
+   (zipper-guide/g i)))
 
 ;; reguide: install a guide at each cursor edge, computed from that edge's cut (its L R).
 ;;   gl, gr : L R -> guide   -- the start edge's maker, the end edge's maker.
@@ -120,10 +134,11 @@
   (define-values (f b) ((on sand-spines sexp-smr) L R))
   (slot-guide (cons (car b) (cdr f))))
 
-;; re-edge: one edge -- read its cut through the edge-sides opt (g folds the view,
-;; receiving L R) to make the guide, then install it at that edge.
-(define ((re-edge i g) z)
-  (((opt-set (edge-guide i)) ((compose g (opt-get (edge-sides i))) z)) z))   ; read the cut -> guide, install at edge i
+;; re-edge: one edge -- read its cut (renders), make the guide with mk, install it there.
+(define ((re-edge i mk) z)
+  ((compose (lambda (g put) (g (lambda ((L R) _guide) (put (mk L R)))))
+            (enter z))
+   (zipper-guide/g i)))
 
 ;; reguide: re-guide the start edge, then the end edge.
 (define (reguide gl gr) (compose (re-edge 1 gr) (re-edge 0 gl)))
@@ -139,26 +154,28 @@
 ;; verb: scribble.
 (define ((slot h) ix) (cons (h (car ix)) (cdr ix)))      ; map the innermost slot; frame (cdr) untouched
 
-;; The list-based verbs are commented out -- exploring the values-based opts (idxs fanned to
-;; values via lref, then vdiag / varg / lref selectors) in their place; see the scratch demo.
-#;(define (at   ix)    ((opt-set (compose-opt idxs (ldiag 0))) ix))                                  ; absolute gap at ix
-#;(define (move f)     (opt-update (compose-opt idxs (ldiag 0)) f))                                  ; gap, f on the basis
-#;(define (edge i f)   (opt-update (compose-opt idxs (lref i)) f))                                   ; one edge (0 start, 1 end)
-#;(define (each fl fr) (opt-update idxs (lambda (xs) (map (lambda (g x) (g x)) (list fl fr) xs))))   ; a fn per edge
-#;(define (both f)     (opt-update idxs (lambda (xs) (map f xs))))                                   ; same fn over both
+;; The verbs are parked (commented) -- each rides `reindex`, one stage-update over an
+;; edge's index optic; the reach is which edges you reindex (compose of one or two), so
+;; the old idxs list + ldiag/lref selectors are gone.
+#;(define (reindex i f) (stage-update (edge-index i) f))                                ; edge i's index by f
+#;(define (at   ix)    (compose (reindex 1 (lambda (_) ix)) (reindex 0 (lambda (_) ix)))) ; absolute gap at ix
+#;(define ((move f) z) ((at (f ((stage-get (edge-index 0)) z))) z))                     ; gap, f on edge 0's basis
+#;(define (edge i f)   (reindex i f))                                                   ; one edge (0 start, 1 end)
+#;(define (each fl fr) (compose (reindex 1 fr) (reindex 0 fl)))                         ; a fn per edge
+#;(define (both f)     (compose (reindex 1 f) (reindex 0 f)))                           ; same fn over both
 
 ;; ---------- a worked edit sequence (the format to follow when one is asked for) ----------
-;; Each verb spelled INLINE as opt-set/opt-update over `idxs` + a tail selector, the sugared verb
-;; named in the trailing comment, the marked document each step produces on the right. `chain` (from
-;; zipper-core's `internal` submodule) threads the commands and prints each step.
+;; Each verb spelled INLINE as a reindex (stage-update over an edge's index optic) composed
+;; per edge, the sugared verb named in the trailing comment, the marked document each step
+;; produces on the right. `chain` (from zipper-core's `internal` submodule) threads and prints.
 ;;
-;;   (chain (cursor rope '(1 0))                                     ; (aa ‸bb cc)
-;;          (opt-update (compose-opt idxs (ldiag 0)) (slot add1))    ; move (slot add1)  -> (aa bb ‸cc)
-;;          ((opt-set (compose-opt idxs (ldiag 0))) '(1 0))          ; at '(1 0)          -> (aa ‸bb cc)
-;;          (opt-update (compose-opt idxs (lref 1))  (slot add1))    ; edge 1 (slot add1) -> (aa ⟦bb ⟧cc)
-;;          (reguide front-guide back-guide)                         ; cover              -> (aa ⟦bb ⟧cc)
-;;          ((opt-set zipper-focus) "XX ")                           ; replace the seg    -> (aa ⟦XX ⟧cc)
-;;          ((opt-set zipper-focus) ""))                             ; delete             -> (aa ‸cc)
+;;   (chain (cursor rope '(1 0))                                          ; (aa ‸bb cc)
+;;          (compose (reindex 1 (slot add1)) (reindex 0 (slot add1)))     ; move (slot add1)  -> (aa bb ‸cc)
+;;          (compose (reindex 1 (lambda (_) '(1 0))) (reindex 0 (lambda (_) '(1 0)))) ; at '(1 0) -> (aa ‸bb cc)
+;;          (reindex 1 (slot add1))                                       ; edge 1 (slot add1) -> (aa ⟦bb ⟧cc)
+;;          (reguide front-guide back-guide)                              ; cover              -> (aa ⟦bb ⟧cc)
+;;          ((stage-set zipper-focus/g) "XX ")                            ; replace the seg    -> (aa ⟦XX ⟧cc)
+;;          ((stage-set zipper-focus/g) ""))                              ; delete             -> (aa ‸cc)
 
 ;; ============================================================================
 ;; Tree generators -- in their own submodule, so they import without dragging in
@@ -273,11 +290,11 @@
     (check-equal? (cuts rope1 front) (cons "(aa " "xx bb cc)"))  ; left-anchored: stays by aa
     (check-equal? (cuts rope1 back)  (cons "(aa xx " "bb cc)"))) ; right-anchored: stays by bb
 
-  ;; --- cut-index: the front index straight off an edge's sides, folding the edge-sides
-  ;; view, no guide -- agrees with edge 0's anchor ---
+  ;; --- cut-index: the front index straight off an edge's sides, folding the
+  ;; edge-view, no guide -- agrees with edge 0's anchor ---
   (let ([z (cursor rope ^bb)])
-    (check-equal? ((compose cut-index (opt-get (edge-sides 0))) z) ^bb)
-    (check-equal? ((compose cut-index (opt-get (edge-sides 0))) z) (anchors z 0)))
+    (check-equal? ((compose cut-index (edge-view 0)) z) ^bb)
+    (check-equal? ((compose cut-index (edge-view 0)) z) (anchors z 0)))
 
   ;; --- anchors snap: floor/ceiling per i, so a clean cut covers as a gap while a cut
   ;; inside an atom brackets the whole atom ---

@@ -35,6 +35,7 @@ lines below to match; a file left off is silently never loaded.
 @summaries/summaries.rkt
 @summaries/sexp-summary.rkt
 @summaries/lisp-summary.rkt
+@summaries/occur-summary.rkt
 @text-edit/sexp-edit.rkt
 @text-edit/lines-edit.rkt
 @text-edit/sexp-split.rkt
@@ -45,3 +46,6 @@ lines below to match; a file left off is silently never loaded.
 @toolbox/main.rkt
 @toolbox/algebra.rkt
 @toolbox/deque.rkt
+@toolbox/lru.rkt
+@toolbox/memoize.rkt
+@toolbox/trie.rkt

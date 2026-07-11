@@ -16,6 +16,7 @@
          char-smr
          word-smr (struct-out wc)
          linecol-smr (struct-out linecol)
+         hash-smr (struct-out fp)
          buffer-smr)
 
 ;; ---------- bundle: a product of summaries ----------
@@ -106,6 +107,27 @@
              (if (zero? yl) (+ xc yc) yc))))   ; column grows until y's own first newline
 (define linecol-smr (make-summary linecol-leaf linecol+))
 
+;; ---------- hash-smr: the content fingerprint ----------
+;; A Karp-Rabin rolling hash as a monoid: value = (fp h scale), scale = B^len mod M,
+;; h(a++b) = h_a·scale_b + h_b. Associativity IS shape-blindness -- the fingerprint
+;; depends only on the text, never on how the rope's branches fall, so it survives
+;; rebalancing (a Merkle-style tree hash would not). Where the other metrics forget
+;; the text and keep one fact, this one forgets every fact and keeps (probabilistic)
+;; IDENTITY: distinct texts collide with chance ~1/M. That's what a memoized algebra
+;; keys its cache by -- each char is hashed once, at its leaf; every join above is
+;; O(1) arithmetic on two integer pairs.
+(struct fp (h scale) #:transparent)           ; two integers: equal? is two compares
+(define fp-M (- (expt 2 61) 1))               ; Mersenne prime
+(define fp-B 1000003)
+(define (fp-leaf s)
+  (for/fold ([h 0] [sc 1] #:result (fp h sc)) ([c (in-string s)])
+    (values (modulo (+ (* h fp-B) (char->integer c)) fp-M)
+            (modulo (* sc fp-B) fp-M))))
+(define (fp-join x y)
+  (fp (modulo (+ (* (fp-h x) (fp-scale y)) (fp-h y)) fp-M)
+      (modulo (* (fp-scale x) (fp-scale y)) fp-M)))
+(define hash-smr (make-summary fp-leaf fp-join))
+
 ;; ---------- the buffer bundle ----------
 ;; sexp navigation AND the plain-text metrics in one product. Slots are keyed by smr IDENTITY
 ;; (eq?), so read each through THESE exported bindings -- a fresh (make-summary ...) is a
@@ -194,12 +216,20 @@
   (check-equal? (linecol-head (linecol-smr "abc"))       3)    ; no newline -> head is the whole string
   (check-equal? (linecol-smr "ab\nc" "d\nef") (linecol-smr "ab\ncd\nef"))
 
+  ;; --- hash-smr: content identity, shape-blind ---
+  (check-equal? (hash-smr "ab" "cd") (hash-smr "abcd"))
+  (check-false  (equal? (hash-smr "ab") (hash-smr "ba")))      ; order distinguishes
+  (check-equal? (hash-smr "") (fp 0 1))                        ; the identity
+  (check-equal? (hash-smr ((make-rope hash-smr) "(a \"x\ny\")"))
+                (hash-smr "(a \"x\ny\")"))                     ; a rope hashes as its text
+
   (require "summary-laws.rkt" rackcheck)
   (define gen:text (gen:string (gen:one-of (string->list "ab  \n()")) #:max-length 16))
   (define metric-corpus (list "" " " "a" "ab cd" "a\nb\n" "\n\n" "  ab  " "x\ny z\nw"))
   (check-summary-laws char-smr    gen:text #:corpus metric-corpus)
   (check-summary-laws word-smr    gen:text #:corpus metric-corpus)
   (check-summary-laws linecol-smr gen:text #:corpus metric-corpus)
+  (check-summary-laws hash-smr    gen:text #:corpus metric-corpus)
 
   (let ([v (buffer-smr "(define x\ny)")])
     (check-equal? (char-smr v) 12)

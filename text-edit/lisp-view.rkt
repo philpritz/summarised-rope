@@ -38,14 +38,22 @@
          "../summaries/summaries.rkt"                        ; bundle, linecol-smr, linecol
          (submod "../summaries/summaries.rkt" experimental)  ; newline-guide*
          "../toolbox/main.rkt")                           ; opt, opt-list, pure, on, pass, arg,
-                                                          ;   scanl, scanr
+                                                          ;   scanl, scanr, memoize
 
 (provide view-smr
          linecol-at leftmost-guide rightmost-guide
          view-runs open-view view-into)
 
-;; the default view algebra: the lisp runs + the (row, col) metric
-(define view-smr (bundle lisp-smr linecol-smr))
+;; the default view algebra: the lisp runs + the (row, col) metric + the content
+;; fingerprint, the whole bundle WORN with an LRU memo keyed by the fingerprint --
+;; a join of previously-seen content is a table hit, so re-reads over unchanged
+;; text (flank scans, scrolls, re-navigations) stop paying the lisp joins; the
+;; chain re-hits (a hit returns the identical cached value, so the next join's key
+;; is identical too). The key fn is the component itself: applying hash-smr to a
+;; bundle value / rope / string IS the O(1) projection to its fp.
+(define view-smr
+  (memoize (bundle lisp-smr linecol-smr hash-smr)
+           #:key (on list hash-smr)))
 
 ;; ---------- guides ----------
 ;; the cut at (r, c), 0-indexed, read lexicographically off the all-left value. A
@@ -90,29 +98,31 @@
   ;; navigation fused with the indexed focus: the get moves then reads, the put
   ;; moves then writes -- a write re-finds the band on the current document
   (define in-place
-    (opt (compose (opt-get zipper-focus) into-band)
-         (lambda (new) (lambda (z) (((opt-set zipper-focus) new) (into-band z))))
-         (arg 0)))
+    (opt-from-peek
+     (lambda (z)
+       (define zb (into-band z))                   ; ONE navigation serves read and write
+       (call-with-values (lambda () ((opt-get zipper-focus) zb))
+         (lambda (fr bs as)
+           (values (lambda (new . _) (((opt-set zipper-focus) new) zb))
+                   fr bs as))))))
 
   ;; -- the cutting --
   ;; band -> lines, each with flanking summaries: the flanks are the two scans
   (define split-lines
-    (opt (lambda (fr bs as)
-           (define frs ((multisect* newline-guide*) fr))
-           (values frs
-                   (drop-right (scanl smr bs frs) 1)
-                   (cdr       (scanr smr as frs))))
-         (lambda (frs*) (lambda (fr bs as) (apply build frs*)))
-         (arg 0)))
+    (opt-from-peek
+     (lambda (fr bs as)
+       (define frs ((multisect* newline-guide*) fr))
+       (values (lambda (frs* . _) (apply build frs*))
+               frs
+               (drop-right (scanl smr bs frs) 1)
+               (cdr       (scanr smr as frs))))))
   ;; crop a line to [c0, c1): guides judged locally, trimmings fuse into the flanks
   (define crop
-    (opt (lambda (fr bs as)
-           (define-values (l m r) ((multisect smr s e) fr))
-           (values m (smr bs l) (smr r as)))
-         (lambda (m*) (lambda (fr bs as)
-                        (define-values (l _m r) ((multisect smr s e) fr))
-                        (build l m* r)))
-         (arg 0)))
+    (opt-from-peek
+     (lambda (fr bs as)
+       (define-values (l m r) ((multisect smr s e) fr))
+       (values (lambda (m* . _) (build l m* r))
+               m (smr bs l) (smr r as)))))
 
   (compose-opt in-place                            ; z -> (fr bs as)
                split-lines                         ;   -> (lines bss ass)
@@ -139,24 +149,30 @@
                     (values (string-ref str j) (vector-ref cs j))
                     (values #f #f))])))
 
-;; open-view: the window opt with the display attached.
-;;   get : z -> (values rows types (view i j))     put : view-runs' own
+;; open-view: the window opt with the display attached -- the render at the
+;; identity stage, where its world IS view-runs' view (rows types), so `matrix`
+;; reads what it always read. The widened read is opt-get*:
+;;   get* : z -> (values rows types (view i j))    put : view-runs' own
 (define (open-view smr r0 r1 c0 c1)
-  (attach-viewer (view-runs smr r0 r1 c0 c1) matrix))
+  (compose-opt (view-runs smr r0 r1 c0 c1)
+               (attach-viewer (compose-opt) matrix)))
 
 ;; view-into: the zero-config reader, z curried first. The operating algebra is
-;; read off the zipper's own values -- the flank summary's owner bundle -- after
-;; checking it carries the two components the pipeline reads; so reads AND any
+;; read off the zipper's own values -- the focus rope's algebra field, NOT the
+;; flank's bundle-val-owner: the owner thunk closes over the raw bundle, so it
+;; cannot answer with an algebra worn from OUTSIDE (view-smr's memo chaperone);
+;; the rope field carries whatever the document was built with, worn included.
+;; Checked to bundle the two components the pipeline reads; so reads AND any
 ;; future writes run in the document's own algebra, never a private stand-in.
 (define ((view-into z) r0 r1 c0 c1)
-  (define-values (_fr bs _as) ((opt-get zipper-focus) z))
+  (define-values (fr bs _as) ((opt-get zipper-focus) z))
   (unless (bundle-val? bs)
     (error 'view-into "the zipper's summary must bundle lisp-smr and linecol-smr, got ~v" bs))
   (for ([c (list lisp-smr linecol-smr)] [n '(lisp-smr linecol-smr)])
     (unless (hash-has-key? (bundle-val-slots bs) c)
       (error 'view-into "the zipper's bundle lacks ~a: ~v" n bs)))
-  (define smr ((bundle-val-owner bs)))
-  ((compose (arg 2) (opt-get (open-view smr r0 r1 c0 c1))) z))
+  (define smr (rope-algebra fr))
+  ((compose matrix (opt-get (view-runs smr r0 r1 c0 c1))) z))   ; one navigation: get, render
 
 ;; ============================================================================
 (module+ test
@@ -213,10 +229,20 @@
   (check-equal? (vals view2 0 0) '(#\; comment))   ; document (2, 3)
   (check-equal? (vals view2 1 0) '(#f #f))         ; row 3 is narrower than the window
 
-  ;; --- open-view: the attached opt -- data AND display in one view ---
-  (let-values ([(rs ts v) ((opt-get (open-view view-smr 0 3 0 99)) z)])
+  ;; --- open-view: the attached opt -- data AND display in one widened read ---
+  (let-values ([(rs ts v) ((opt-get* (open-view view-smr 0 3 0 99)) z)])
     (check-equal? ts types)                        ; the data channels are view-runs'
     (check-equal? (vals v 1 0) '(#\y string)))     ; the render rides last
+
+  ;; --- view-smr: the worn bundle -- observationally the algebra, cache live ---
+  (check-true (memo? view-smr))
+  (check-equal? (hash-smr (view-smr "(a)")) (hash-smr "(a)"))  ; the fp slot rides along
+  (check-equal? (view-smr "(a " "b)") (view-smr "(a b)"))      ; still the same monoid
+  (let* ([v  (view-smr "(a ")]
+         [w  (view-smr "b)")]
+         [n1 (begin (view-smr v w) (memo-size view-smr))])
+    (view-smr v w)                                             ; the same join again...
+    (check-equal? (memo-size view-smr) n1))                    ; ...is a hit, not an entry
 
   ;; --- view-into derives the algebra: a RICHER bundle works as itself ---
   (let* ([big  (bundle lisp-smr linecol-smr char-smr)]

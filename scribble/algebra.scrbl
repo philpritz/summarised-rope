@@ -211,7 +211,7 @@ transpose-dual of @racket[pass] (which forks functions over one fixed arg-tuple)
 
 @examples[#:eval ev
   ((spread list add1 sub1) 10 20)
-  (code:line ((spread + values string-length) 10 "abc") (code:comment "the make-summary shape"))]
+  (code:line ((spread + values string-length) 10 "abc") (code:comment "mixed per-arg preprocessors"))]
 See @secref["spread-fold"] for its use inside @racket[variadic], and @secref["inlining"]
 for the arity dispatch.
 }
@@ -219,15 +219,18 @@ for the arity dispatch.
 @section{variadic, fixed, lexicographic}
 
 @defproc[((variadic [op procedure?] [id any/c]) [a any/c] ...) any/c]{
-Lifts a binary @racket[op] (called accumulator-first, @racket[(op acc x)]) and a seed
-@racket[id] to a function of any arity that left-folds its arguments from @racket[id]:
-@racket[(variadic op id) a b] = @racket[(op (op id a) b)], and @racket[((variadic op id))]
-= @racket[id]. @racket[id] is folded in even in the base cases --- no identity-law
-assumption, so the result matches a plain left fold for @emph{any} @racket[op] / @racket[id].
+Lifts a @bold{monoid} @racket[op] (called accumulator-first, @racket[(op acc x)]) with unit
+@racket[id] to a function of any arity that left-folds its arguments from the @bold{first}
+one: @racket[(variadic op id) a b] = @racket[(op a b)], and @racket[((variadic op id))]
+= @racket[id]. @racket[id] seeds @emph{only} the empty call, so the 2-ary and n-ary paths
+compute no @racket[(op id x)]. This @bold{assumes} the identity law @racket[(op id x) = x]
+--- folding from the first argument equals folding from @racket[id] only for a monoid, so a
+non-monoid @racket[op] no longer sees @racket[id] folded in. (The lone 1-ary case keeps
+@racket[(op id a)], letting a coercing @racket[op] preprocess a single argument.)
 
 @examples[#:eval ev
   ((variadic + 0) 1 2 3 4)
-  (code:line ((variadic - 0) 5 3) (code:comment "non-monoidal: seed and order matter"))]
+  (code:line ((variadic + 0)) (code:comment "empty = the unit"))]
 }
 
 @defproc[((fixed [improve procedure?] [same? procedure? equal?] [key procedure? list]) [a any/c] ...) any]{
@@ -304,11 +307,12 @@ gap-collapsing twin, and @racket[varg] is @racket[arg] reified as a lens.
 @subsection[#:tag "spread-fold"]{spread inside variadic}
 
 @racket[spread] preprocesses a reducer's arguments. @racket[(variadic (spread combine
-values coerce) id)] folds coerced arguments: @racket[values] passes the accumulator
-through untouched, @racket[coerce] maps each incoming element, and @racket[combine] folds
-the two. This is the @racket[make-summary] shape in @tt{rope-core.rkt} --- the accumulator
-is the running summary, the element is coerced to a summary, and the monoid combine fuses
-them.
+coerce coerce) id)] folds coerced arguments: each @racket[coerce] maps one side to a
+summary and @racket[combine] fuses the two. This is the @racket[make-summary] shape in
+@tt{rope-core.rkt} --- the accumulator and the element are both coerced to summaries and
+the monoid combine fuses them. Both sides take @racket[coerce] because @racket[variadic]
+now seeds the fold from the first argument, not from @racket[id]: with the id-seed gone,
+nothing else coerces that first argument, so @racket[op] must.
 
 @subsection[#:tag "inlining"]{The small-arity inlining}
 
@@ -322,8 +326,9 @@ the same values as the generic tail.
   the common arities run at hand-wrapper speed; 5+ falls to a @racket[map]/@racket[apply]
   tail.}
   @item{@racket[variadic] inlines the 0/1/2-ary cases (nearly every call), skipping the
-  rest-arg list and the @racket[foldl] --- but folding @racket[id] in regardless, so the
-  value is identical for any @racket[op] / @racket[id].}
+  rest-arg list and the @racket[foldl]. The 2-ary and n-ary paths seed from the first
+  argument (no @racket[(op id x)]); only the empty and 1-ary cases touch @racket[id]. Valid
+  for a monoid @racket[op], by the identity law @racket[(op id x) = x].}
   @item{@racket[fixed] inlines arities 1..4 (navigate's @tt{ascend}/@tt{descend} are
   2-value). The internal macro @tt{fixed-case} builds, per clause, a loop on named
   variables with no per-step @racket[list]/@racket[apply]/@racket[compose], carrying the
