@@ -5,10 +5,9 @@
 ;; point to; the provide list is the surface map). Intended as a reusable helper
 ;; library, so some surface is built out past what this project strictly needs.
 ;; Narrative -- the iso group law, the optic protocol, the inlining rationale -- in
-;; scribble/algebra.scrbl (pre-dates this store-shaped generation). Its successor,
-;; the staged optic, is toolbox/stage.rkt; this generation and the record-opt one
-;; before it are snapshot in toolbox/old, the van Laarhoven one in
-;; deprecated/deprecated-7.
+;; scribble/algebra.scrbl (pre-dates this store-shaped generation; the record-opt
+;; generation is archived in toolbox/old, the van Laarhoven one in
+;; deprecated/deprecated-7).
 
 (provide (struct-out spl)       ; (spl to from): a SPLITTING -- section `to` (embeds),
                                  ;   retraction `from` (may lose), law (from . to) = id;

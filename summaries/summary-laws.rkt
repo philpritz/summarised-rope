@@ -100,12 +100,12 @@
   ;; --- the battery passes on a lawful summary, corpus included ---
   (check-summary-laws cc gs:ab #:corpus (list "" "a" "((b a)" "a b"))
 
-  ;; --- the battery's teeth: each law group catches exactly its own mutant ---
-  (define minus (make-summary string-length -))   ; broken monoid, but the fold still matches
-  (check-false (identity-law? minus (minus "a")))
+  ;; --- the battery's teeth: the law groups catch the mutants ---
+  (define minus (make-summary string-length -))   ; broken monoid; variadic seeds the fold
+  (check-false (identity-law? minus (minus "a")))         ; from the FIRST arg, so a
   (check-false (associativity-law? minus (minus "") (minus "") (minus "a")))
-  (check-true  (homomorphism-law? minus "ab" '(1)))   ; -> only the summary group fails
-  (check-true  (homomorphism-law? minus "abc" '(1 2)))
+  (check-false (homomorphism-law? minus "ab" '(1)))   ; non-monoid op now diverges from
+  (check-false (homomorphism-law? minus "abc" '(1 2)))  ; the 1-ary (id-seeded) leaf too
 
   (define mx (make-summary string-length max))    ; fine monoid, but max-of-parts /= whole
   (check-true  (identity-law? mx (mx "a")))

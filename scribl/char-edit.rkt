@@ -39,8 +39,7 @@
 
 ;; cover: re-anchor the end edge onto its back anchor, so edits between the edges
 ;; stay wrapped.  Reads both anchors fresh and installs the back one at edge 1.
-(define (edge-contexts z i)
-  ((on-edges (lambda (e0 e1) (apply values (if (zero? i) e0 e1))) list list) z))
+(define (edge-contexts z i) ((edge-view i) z))
 (define (anchors z i) (call-with-values (lambda () (edge-contexts z i)) read-cut))
 (define (cover z)
   (define-values (front back) (anchors z 1))

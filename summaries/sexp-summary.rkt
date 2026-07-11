@@ -14,6 +14,8 @@
          "../rope-core.rkt")          ; make-summary
 
 (provide sexp-smr malformed?
+         sexp-leaf sexp+           ; the bare leaf/combine -- call directly to skip the
+                                   ; make-summary dispatch when args are known raw values
          sand-spines               ; (L R) -> (values front back)
          str-smr strsexp-smr
          strsexp-spines strsexp-in-string?)
