@@ -41,7 +41,8 @@
 
 (provide compose-stage compose-stage2 identity-stage
          enter recompose
-         stage-get stage-view stage-get* stage-set stage-update)
+         stage-get stage-view stage-get* stage-set stage-update
+         reading writing)
 
 ;; helper: run a function and reify its multiple values as a list (algebra keeps a
 ;; private copy; stage.rkt is self-contained above the toolbox aggregator).
@@ -94,6 +95,13 @@
   (define-values (g put) ((apply enter ws) f))
   (g (pure put)))
 
+;; reading / writing: hand the store a CURRIED consumer h (renders then foci, in the
+;; store's own application order) rather than a standard projection -- compose either
+;; onto (enter z): ((compose (reading h) (enter z)) optic). reading returns h's value;
+;; writing feeds it to the put. (writing h) is stage-update's core, left to compose by hand.
+(define ((reading h) g _put) (g h))
+(define ((writing h) g put)  (put (g h)))
+
 ;; ============================================================================
 (module+ test
   (require rackunit
@@ -139,6 +147,11 @@
   (check-equal? (g pure) (list 7 '+))                    ; view
   (check-equal? (g (pure put)) 40)                       ; recompose, by hand
   (check-equal? (put 9) 90)                              ; set, by hand
+
+  ;; --- reading / writing: a curried store consumer composed by hand onto (enter z) ---
+  (check-equal? ((compose (reading (lambda ((r) q) (list q r))) (enter 47)) tower)
+                (list 4 (list 7 '+)))                    ; h : renders then foci, application order
+  (check-equal? ((compose (writing (lambda ((r) q) (add1 q))) (enter 47)) tower) 50)  ; 4 -> 5 -> *10
 
   ;; --- identity-stage is the unit of compose-stage ---
   (check-equal? ((stage-get (compose-stage)) 99) 99)

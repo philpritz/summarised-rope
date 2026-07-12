@@ -495,15 +495,29 @@
 ;; passed through untouched; only a parenthesised head triggers currying. The
 ;; binder reads like the call site: ((L R) focus) abstracts as
 ;; (lambda (L R) (lambda (focus) e)) -- exactly an ilens rebaser's shape.
+;; `lambda*` is the general twin: it curries EVERY parenthesised stage (head and tail,
+;; any depth), with an improper tail the terminal rest --
+;;   (lambda* ((a b) (c d) z) e) = (lambda (a b) (lambda (c d) (lambda (z) e)))
+;;   (lambda* ((_ . as) . bs) e) = (lambda (_ . as) (lambda bs e))
+;; `lambda` peels only its head level, dumping the tail into one final flat binder.
+;; The `*` is the let*/for* sense -- nest a clause list into single-clause forms (here
+;; the nesting is currying) -- NOT match*'s parallel-values sense.
 ;; Self-contained -- delete this submodule to retract.
 (module+ experimental
   (require (only-in racket/base [lambda %lambda]))    ; the genuine lambda, renamed
-  (provide lambda)
+  (provide lambda lambda*)
 
   (define-syntax lambda
     (syntax-rules ()
       [(_ ((h . inner) . args) body ...)              ; parenthesised head -> peel one level
        (lambda (h . inner) (%lambda args body ...))]
+      [(_ formals body ...)                           ; flat / rest / kw / optional -> real lambda
+       (%lambda formals body ...)]))
+
+  (define-syntax lambda*                              ; the general twin: every stage curries, head AND tail
+    (syntax-rules ()
+      [(_ ((h . inner) . rest) body ...)              ; a parenthesised stage -> peel it, recurse both sides
+       (lambda* (h . inner) (lambda* rest body ...))]
       [(_ formals body ...)                           ; flat / rest / kw / optional -> real lambda
        (%lambda formals body ...)]))
 
@@ -527,6 +541,13 @@
     (check-equal? (((lambda ((L R) focus) (list L R focus)) 'l 'r) 'f)   ; the rebaser shape
                   '(l r f))
     (check-equal? ((lambda (a b) (+ a b)) 2 5) 7)                        ; flat = ordinary lambda
+
+    ;; lambda* -- the general twin: matches lambda on a 2-stage binder; adds multi-stage
+    ;; tails and a rest at each stage
+    (check-equal? (((lambda* ((L R) focus) (list L R focus)) 'l 'r) 'f) '(l r f))
+    (check-equal? ((((lambda* ((a b) (c d) e) (list a b c d e)) 1 2) 3 4) 5) '(1 2 3 4 5))
+    (check-equal? (((lambda* ((_ . as) . bs) (list as bs)) 0 1 2) 3 4) '((1 2) (3 4)))
+
     (check-equal? (apply (lambda xs xs) '(1 2 3)) '(1 2 3))              ; rest arg, untouched
     (check-equal? ((lambda (x [y 10]) (+ x y)) 5) 15)))                  ; optional arg, untouched
 

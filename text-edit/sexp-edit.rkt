@@ -113,14 +113,14 @@
 
 ;; anchors: read edge i's cut off (zipper-guide/g i)'s bus, snap it -- a pure read.
 (define (anchors z i)
-  ((compose (lambda (g _put) (g (lambda ((L R) _guide) ((snap i) L R))))
+  ((compose (reading (lambda ((L R) _guide) ((snap i) L R)))
             (enter z))
    (zipper-guide/g i)))
 
 ;; reanchor: install edge i's guide from its snapped anchor (read off the cut, re-navigates).
-;; The (g put) handler reads the cut (renders) and writes the snapped guide (put), one pass.
+;; `writing` reads the cut (renders) and feeds the snapped guide to the put, one pass.
 (define ((reanchor i) z)
-  ((compose (lambda (g put) (g (lambda ((L R) _guide) (put (slot-guide ((snap i) L R))))))
+  ((compose (writing (lambda ((L R) _guide) (slot-guide ((snap i) L R))))
             (enter z))
    (zipper-guide/g i)))
 
@@ -136,7 +136,7 @@
 
 ;; re-edge: one edge -- read its cut (renders), make the guide with mk, install it there.
 (define ((re-edge i mk) z)
-  ((compose (lambda (g put) (g (lambda ((L R) _guide) (put (mk L R)))))
+  ((compose (writing (lambda ((L R) _guide) (mk L R)))
             (enter z))
    (zipper-guide/g i)))
 
