@@ -10,8 +10,8 @@
          (submod "../rope-core.rkt" experimental)              ; multisect*
          "../summaries/summaries.rkt"                           ; linecol-smr
          (submod "../summaries/summaries.rkt" experimental)     ; newline-guide*
-         "../toolbox/main.rkt"                               ; iso, iso->opt
-         "../zipper-core.rkt")                                  ; zipper-focus
+         "../toolbox/main.rkt"                               ; iso, iso->stage
+         "../zipper-core.rkt")                                  ; zipper-focus/g, compose-stage
 
 (provide lines-iso focus-lines)
 
@@ -19,4 +19,4 @@
 (define lines-iso (iso (multisect* newline-guide*) (curry apply (make-rope linecol-smr))))
 
 ;; split the cursor's focus into its lines (one focus = the list of line ropes).
-(define focus-lines (compose-opt zipper-focus (iso->opt lines-iso)))
+(define focus-lines (compose-stage zipper-focus/g (iso->stage lines-iso)))

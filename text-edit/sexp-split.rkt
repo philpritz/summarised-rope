@@ -10,8 +10,9 @@
 (require "../rope-core.rkt"
          (submod "../rope-core.rkt" experimental)        ; make-guide*, multisect*
          "../summaries/sexp-summary.rkt"                  ; sexp-smr, sand-spines
-         "../toolbox/main.rkt"                         ; iso, iso->opt, the opt ops
-         "../zipper-core.rkt")                            ; zipper-focus
+         "../toolbox/main.rkt"                         ; iso, iso->stage, the stage ops, reading/writing, enter
+         "../zipper-core.rkt"                            ; zipper-focus/g, compose-stage
+         (submod "../toolbox/algebra.rkt" experimental)) ; the curried `lambda` -- (lambda ((bs as) fr) ...)
 
 (provide split-guide* split-iso focus-split)
 
@@ -31,7 +32,7 @@
 (define (split-iso maxd) (iso (multisect* (split-guide* maxd)) (curry apply build)))
 
 ;; the cursor's focus, split into its sexp pieces at depth maxd.
-(define (focus-split maxd) (compose-opt zipper-focus (iso->opt (split-iso maxd))))
+(define (focus-split maxd) (compose-stage zipper-focus/g (iso->stage (split-iso maxd))))
 
 ;; ============================================================================
 ;; SCRATCH -- list-sexp <-> string editing. read/print is lossy (whitespace, comments,
@@ -49,4 +50,7 @@
 (define ((edit-sexp f) r)
   (build (string-join (map (lambda (d) (format "~s" d)) (f (read-all (~a r)))) " ")))
 
-(define (modify-focus f) (opt-update zipper-focus (edit-sexp f)))
+;; a focus rewrite via the reading/writing idiom: the flanks (bs as) ride zipper-focus/g's
+;; bus; edit-sexp wants the focus alone, so the writing consumer drops them.
+(define ((modify-focus f) z)
+  ((compose (writing (lambda ((_bs _as) fr) ((edit-sexp f) fr))) (enter z)) zipper-focus/g))

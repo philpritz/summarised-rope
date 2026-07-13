@@ -115,6 +115,8 @@
 (define (rope-zero t)
   (list ((rope-algebra t) "") 0 0))
 
+(define (empty-rope? t) (zero? (rope-leaves t)))   ; no leaves -> the empty rope
+
 (define ((combine-info smr) a b)
   (list (smr (first a) (first b))
         (+   (second a) (second b))
@@ -129,14 +131,15 @@
 
 ;; the one descent; used internally only, not exported.
 (define ((bisect cmb) t [decide (on (within-ratio 3) second)])
+  (define mt ((leaf-rope (rope-algebra t)) ""))   ; the empty rope, minted once
   (let descend ([before (rope-zero t)] [t t] [after (rope-zero t)])
     (define-values (l r) (rope-split t))
     (define il (rope-info l)) (define ir (rope-info r))
     (define L (cmb before il))
     (define R (cmb ir after))
     (cond
-      [(or (zero? (second il)) (zero? (second ir)))      ; a half empty -> leaf too small to halve
-       (if (positive? (decide L R)) (values r l) (values l r))]   ; cut at the far / near edge
+      [(or (empty-rope? l) (empty-rope? r))      ; a half empty -> t is a lone char, indivisible
+       (if (positive? (decide L R)) (values t mt) (values mt t))]   ; the whole piece, cut after / before
       [else
        (match (decide L R)
          [ 0 (values l r)]                                                                ; cut is here
