@@ -113,14 +113,14 @@
 
 ;; anchors: read edge i's cut off (zipper-guide/g i)'s bus, snap it -- a pure read.
 (define (anchors z i)
-  ((compose (lambda (g _put) (g (lambda ((L R) _guide) ((snap i) L R))))
+  ((compose (reading (lambda ((L R) _guide) ((snap i) L R)))
             (enter z))
    (zipper-guide/g i)))
 
 ;; reanchor: install edge i's guide from its snapped anchor (read off the cut, re-navigates).
-;; The (g put) handler reads the cut (renders) and writes the snapped guide (put), one pass.
+;; `writing` reads the cut (renders) and feeds the snapped guide to the put, one pass.
 (define ((reanchor i) z)
-  ((compose (lambda (g put) (g (lambda ((L R) _guide) (put (slot-guide ((snap i) L R))))))
+  ((compose (writing (lambda ((L R) _guide) (slot-guide ((snap i) L R))))
             (enter z))
    (zipper-guide/g i)))
 
@@ -136,7 +136,7 @@
 
 ;; re-edge: one edge -- read its cut (renders), make the guide with mk, install it there.
 (define ((re-edge i mk) z)
-  ((compose (lambda (g put) (g (lambda ((L R) _guide) (put (mk L R)))))
+  ((compose (writing (lambda ((L R) _guide) (mk L R)))
             (enter z))
    (zipper-guide/g i)))
 
@@ -238,14 +238,14 @@
   (define (cuts rope ix)                  ; where a single index cuts, as strings
     (let-values ([(l r) ((multisect sexp-smr (slot-guide ix)) rope)])
       (cons (~a l) (~a r))))
-  (define (doc z) (~a ((opt-get zipper-focus) (to-root z))))
+  (define (doc z) (~a ((stage-get zipper-focus/g) (to-root z))))
   (define rope ((make-rope sexp-smr) "(aa bb cc)"))
   (define ^bb (front-of "(aa bb cc)" 4))
   (define ^cc (front-of "(aa bb cc)" 7))
 
   (let ([z (cursor rope ^bb)])                       ; gap: replace at an empty focus = insert
-    (check-equal? (~a ((opt-get zipper-focus) z)) "")
-    (check-equal? (doc (((opt-set zipper-focus) "xx ") z)) "(aa xx bb cc)"))
+    (check-equal? (~a ((stage-get zipper-focus/g) z)) "")
+    (check-equal? (doc (((stage-set zipper-focus/g)"xx ") z)) "(aa xx bb cc)"))
 
   ;; --- the same navigation through a BUNDLE rope: sexp guides read the sexp
   ;; component out of each bundle value via (on sand-spines sexp-smr) ---
@@ -253,30 +253,30 @@
          [b     (bundle sexp-smr cc)]
          [brope ((make-rope b) "(aa bb cc)")]
          [gs    (sexp-guides ^bb)]
-         [z     (((opt-set zipper-guide) gs) (start b brope (first gs) (second gs)))])
-    (check-equal? (~a ((opt-get zipper-focus) z)) "")
-    (check-equal? (doc (((opt-set zipper-focus) "xx ") z)) "(aa xx bb cc)"))
+         [z     (((stage-set zipper-guides) gs) (start b brope (first gs) (second gs)))])
+    (check-equal? (~a ((stage-get zipper-focus/g) z)) "")
+    (check-equal? (doc (((stage-set zipper-focus/g)"xx ") z)) "(aa xx bb cc)"))
 
   (let ([z (cursor rope ^bb ^cc)])                   ; seg [^bb ^cc): half-open
-    (check-equal? (~a ((opt-get zipper-focus) z)) "bb ")
-    (check-equal? (doc (((opt-set zipper-focus) "XX ") z)) "(aa XX cc)")
-    (check-equal? (doc (((opt-set zipper-focus) "") z)) "(aa cc)")) ; the empty replace = delete
+    (check-equal? (~a ((stage-get zipper-focus/g) z)) "bb ")
+    (check-equal? (doc (((stage-set zipper-focus/g)"XX ") z)) "(aa XX cc)")
+    (check-equal? (doc (((stage-set zipper-focus/g)"") z)) "(aa cc)")) ; the empty replace = delete
 
   ;; back index navigates to the same place
-  (check-equal? (doc (((opt-set zipper-focus) "xx ") (cursor rope (back-of "(aa bb cc)" 4))))
+  (check-equal? (doc (((stage-set zipper-focus/g)"xx ") (cursor rope (back-of "(aa bb cc)" 4))))
                 "(aa xx bb cc)")
 
   ;; --- the end slot: slot N of an N-child frame is a real target; both
   ;; anchorings name it (front N | right -1) and appending lands tight after
   ;; the last child ---
-  (check-equal? (doc (((opt-set zipper-focus) " dd") (cursor rope '(3 0))))  "(aa bb cc dd)")
-  (check-equal? (doc (((opt-set zipper-focus) " dd") (cursor rope '(-1 0)))) "(aa bb cc dd)")
+  (check-equal? (doc (((stage-set zipper-focus/g)" dd") (cursor rope '(3 0))))  "(aa bb cc dd)")
+  (check-equal? (doc (((stage-set zipper-focus/g)" dd") (cursor rope '(-1 0)))) "(aa bb cc dd)")
   (let ([z (cursor ((make-rope sexp-smr) "(aa )") '(1 0))]) ; ws after the last child:
     (check-equal? (~a z) "(aa ‸)"))                         ; lands tight before the close (ws binds left)
 
   ;; --- navigation + editing, nested ---
   (define rope2 ((make-rope sexp-smr) "(aa (p q) cc)"))
-  (check-equal? (doc (((opt-set zipper-focus) "xx ") (cursor rope2 (front-of "(aa (p q) cc)" 7))))
+  (check-equal? (doc (((stage-set zipper-focus/g)"xx ") (cursor rope2 (front-of "(aa (p q) cc)" 7))))
                 "(aa (p xx q) cc)")
 
   ;; --- anchors: edge 0 reads its front anchor, edge 1 its back; they name the same gap now
@@ -286,7 +286,7 @@
          [back  (anchors z 1)])
     (check-equal? front '(1 0))
     (check-equal? back  '(-3 0))                       ; right head over the left path
-    (define rope1 ((opt-get zipper-focus) (to-root (((opt-set zipper-focus) "xx ") z))))
+    (define rope1 ((stage-get zipper-focus/g) (to-root (((stage-set zipper-focus/g)"xx ") z))))
     (check-equal? (cuts rope1 front) (cons "(aa " "xx bb cc)"))  ; left-anchored: stays by aa
     (check-equal? (cuts rope1 back)  (cons "(aa xx " "bb cc)"))) ; right-anchored: stays by bb
 
@@ -299,45 +299,45 @@
   ;; --- anchors snap: floor/ceiling per i, so a clean cut covers as a gap while a cut
   ;; inside an atom brackets the whole atom ---
   (let ([gm (cover (cursor rope '(3/2 0)))])      ; a gap inside "bb" (mid-atom, head 3/2)
-    (check-equal? (~a ((opt-get zipper-focus) gm)) "bb "))   ; cover snaps to select the atom
+    (check-equal? (~a ((stage-get zipper-focus/g) gm)) "bb "))   ; cover snaps to select the atom
   (let ([gc (cover (cursor rope ^bb))])           ; a clean gap at ^bb
-    (check-equal? (~a ((opt-get zipper-focus) gc)) ""))      ; stays a gap
+    (check-equal? (~a ((stage-get zipper-focus/g) gc)) ""))      ; stays a gap
 
   ;; --- cover: re-anchor the end onto its back anchor; the right anchor stays fixed while the
   ;; stuff inside is edited ---
   (let* ([z  (cover (cursor rope2 (front-of "(aa (p q) cc)" 7)))] ; covered gap at ^q
-         [z1 (((opt-set zipper-focus) "x ") z)]
-         [z2 (((opt-set zipper-focus) "x y ") z1)]
-         [z3 (((opt-set zipper-focus) "") z2)])
-    (check-equal? (~a ((opt-get zipper-focus) z1)) "x ")
+         [z1 (((stage-set zipper-focus/g)"x ") z)]
+         [z2 (((stage-set zipper-focus/g)"x y ") z1)]
+         [z3 (((stage-set zipper-focus/g)"") z2)])
+    (check-equal? (~a ((stage-get zipper-focus/g) z1)) "x ")
     (check-equal? (doc z1) "(aa (p x q) cc)")
-    (check-equal? (~a ((opt-get zipper-focus) z2)) "x y ")
+    (check-equal? (~a ((stage-get zipper-focus/g) z2)) "x y ")
     (check-equal? (doc z2) "(aa (p x y q) cc)")    ; the interior grew: q held its ground
-    (check-equal? (~a ((opt-get zipper-focus) z3)) "")
+    (check-equal? (~a ((stage-get zipper-focus/g) z3)) "")
     (check-equal? (doc z3) "(aa (p q) cc)"))       ; and shrank back to the gap
 
   (let* ([z (cover (cursor rope ^bb ^cc))])        ; a seg, covered by the same mechanism
-    (check-equal? (~a ((opt-get zipper-focus) z)) "bb ")
-    (check-equal? (doc (((opt-set zipper-focus) "b1 (b2 b3) ") z)) "(aa b1 (b2 b3) cc)"))
+    (check-equal? (~a ((stage-get zipper-focus/g) z)) "bb ")
+    (check-equal? (doc (((stage-set zipper-focus/g)"b1 (b2 b3) ") z)) "(aa b1 (b2 b3) cc)"))
 
   ;; reguide is parameterised per edge: a maker pair sets each edge's guide from its cut.
   ;; (reguide front-guide back-guide) reproduces cover; front on both keeps the seg front-anchored.
   (let ([z ((reguide front-guide back-guide) (cursor rope ^bb ^cc))])
-    (check-equal? (doc (((opt-set zipper-focus) "b1 (b2 b3) ") z)) "(aa b1 (b2 b3) cc)"))  ; == cover
+    (check-equal? (doc (((stage-set zipper-focus/g)"b1 (b2 b3) ") z)) "(aa b1 (b2 b3) cc)"))  ; == cover
   (let ([z ((reguide front-guide front-guide) (cursor rope ^bb ^cc))])
-    (check-equal? (~a ((opt-get zipper-focus) z)) "bb "))
+    (check-equal? (~a ((stage-get zipper-focus/g) z)) "bb "))
 
   ;; --- the edit verbs are commented out (values-based exploration); their tests too ---
   #;(let ([z (cursor rope '(1 0))])                  ; a gap before bb
-    (check-equal? (doc (((opt-set zipper-focus) "xx ") ((at '(2 0)) z)))         ; absolute
+    (check-equal? (doc (((stage-set zipper-focus/g)"xx ") ((at '(2 0)) z)))         ; absolute
                   "(aa bb xx cc)")
-    (check-equal? (doc (((opt-set zipper-focus) "xx ") ((move (slot add1)) z)))  ; advance one slot
+    (check-equal? (doc (((stage-set zipper-focus/g)"xx ") ((move (slot add1)) z)))  ; advance one slot
                   "(aa bb xx cc)")
-    (check-equal? (~a ((opt-get zipper-focus) ((each values (slot add1)) z)))  ; open gap -> seg
+    (check-equal? (~a ((stage-get zipper-focus/g) ((each values (slot add1)) z)))  ; open gap -> seg
                   "bb ")
-    (check-equal? (~a ((opt-get zipper-focus) ((edge 1 (slot add1)) z))) "bb ")) ; one edge: end +1 = same seg
+    (check-equal? (~a ((stage-get zipper-focus/g) ((edge 1 (slot add1)) z))) "bb ")) ; one edge: end +1 = same seg
   #;(let ([z (cursor rope '(1 0) '(2 0))])           ; a seg [bb, cc) = "bb "
-    (check-equal? (~a ((opt-get zipper-focus) ((both (slot add1)) z))) "cc"))    ; shift both edges
+    (check-equal? (~a ((stage-get zipper-focus/g) ((both (slot add1)) z))) "cc"))    ; shift both edges
 
   ;; ========================================================================
   ;; Document isos -- test scaffolding for the index battery (rationale: scribble).

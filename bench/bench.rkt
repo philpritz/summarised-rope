@@ -97,12 +97,12 @@
   ;; install triggers `navigate` (ascend . descend . carve) -- the O(log N) op.
   ;; (The char guide lives in zipper-core's test module, so reproduce it here.)
   (define ((at n) L R) (cond [(< L n) 1] [(> L n) -1] [else 0]))
-  (define (gap n) (vector (at n) (at n)))
-  (define (install p) (((opt-set zipper-guide) (cdr p)) (car p)))   ; (zipper . guide-vec) -> navigate
+  (define (gap n) (list (at n) (at n)))
+  (define (install p) (((stage-set zipper-guides) (cdr p)) (car p)))   ; (zipper . guide-list) -> navigate
   (table "nav,char: install midpoint gap, n-char rope        -- expect ~flat (log)"
          (bench install
                 (lambda (n) (let ([g (gap (quotient n 2))])
-                              (cons (start sum ((make-rope sum) (make-string n #\x)) g) g)))
+                              (cons (start sum ((make-rope sum) (make-string n #\x)) (first g) (second g)) g)))
                 sizes #:reps 50))
 
   ;; nav (sexp): the genuine sexp cursor over REAL generated trees. We DON'T bound
@@ -123,7 +123,7 @@
     (define text (tree->text t))
     (define tgt  (front-at text (quotient (string-length text) 2)))
     (define gs   (sexp-guides tgt))
-    (define z    (start sexp-smr ((make-rope sexp-smr) text) gs))
+    (define z    (start sexp-smr ((make-rope sexp-smr) text) (first gs) (second gs)))
     (cons (string-length text) (cons z gs)))
   (printf "\nnav,sexp: generated trees, navigate to midpoint gap (avg over ~a trees/config)\n" K)
   (printf "          axis is max-kids x depth, NOT size  -- expect ~~flat/log in doc size\n")
@@ -177,7 +177,7 @@
   (define dag-base ((make-rope sexp-smr) (string-append* (make-list 12 "(a b c)"))))  ; 84 chars, 12 forms
   (define (doubled d) (for/fold ([h dag-base]) ([_ (in-range d)]) ((make-rope sexp-smr) h h)))
   (define (counting gs counter)                       ; wrap each guide to tally its calls
-    (vector-map (lambda (g) (lambda (L R) (set-box! counter (add1 (unbox counter))) (g L R))) gs))
+    (map (lambda (g) (lambda (L R) (set-box! counter (add1 (unbox counter))) (g L R))) gs))
   (printf "\ndeep DAG (branch(h,h) sharing): navigate to the middle form, COUNT guide calls\n")
   (printf "          count is fixnum O(d)=O(log N); the doc has 12*2^d forms, never allocated\n")
   (printf "~a  ~a  ~a  ~a\n"
@@ -194,7 +194,7 @@
     (define target (list (quotient forms 2)))         ; the middle top-level form
     (define counter (box 0))
     (define gs (counting (sexp-guides target) counter))
-    (((opt-set zipper-guide) gs) (start sexp-smr r gs))      ; navigate, tallying guide calls
+    (((stage-set zipper-guides) gs) (start sexp-smr r (first gs) (second gs)))  ; navigate, tallying guide calls
     (printf "~a  ~a  ~a  ~a\n"
             (~a d #:min-width 6)
             (~a (string-length (number->string forms)) #:min-width 14)

@@ -7,7 +7,9 @@
 ;; the family split, and the cut's anchors -- and everything else is placement,
 ;; covering, and navigation written with the opt ops on zipper-guide.
 
-(require "../rope-core.rkt" "../zipper-core.rkt")
+(require "../rope-core.rkt" "../zipper-core.rkt"
+         "../toolbox/main.rkt"                              ; reading/writing, enter
+         (submod "../toolbox/algebra.rkt" experimental))    ; the curried `lambda`
 
 (provide char-smr            ; the summary
          cursor cover goto   ; placement, the covering re-anchor, navigation
@@ -33,17 +35,19 @@
 (define (read-cut L R) (values (list L) (list (- (add1 R)))))
 
 ;; placement: start a fresh zipper with two index-guides, then navigate to them
-;; (one index = a gap).
+;; (one index = a gap).  The guide list rides zipper-core's staged both-edges optic.
 (define (cursor rope s [e s])
-  (let ([gs (vector (idx s) (idx e))]) (((opt-set zipper-guide) gs) (start char-smr rope gs))))
+  (let ([gs (idx s)] [ge (idx e)])
+    (((stage-set zipper-guides) (list gs ge)) (start char-smr rope gs ge))))
 
 ;; cover: re-anchor the end edge onto its back anchor, so edits between the edges
 ;; stay wrapped.  Reads both anchors fresh and installs the back one at edge 1.
 (define (edge-contexts z i) ((edge-view i) z))
 (define (anchors z i) (call-with-values (lambda () (edge-contexts z i)) read-cut))
 (define (cover z)
-  (define-values (front back) (anchors z 1))
-  ((opt-update zipper-guide (lambda (gs) (vector (vector-ref gs 0) (idx back)))) z))
+  (define-values (_front back) (anchors z 1))
+  ;; the writing consumer keeps the start guide and installs the back anchor at edge 1
+  ((compose (writing (lambda ((_Ls _Rs) gs) (list (car gs) (idx back)))) (enter z)) zipper-guides))
 
 ;; navigation: reposition the cursor (install fresh guides on the current zipper).
-(define (goto s [e s]) (lambda (z) (((opt-set zipper-guide) (vector (idx s) (idx e))) z)))
+(define (goto s [e s]) (lambda (z) (((stage-set zipper-guides) (list (idx s) (idx e))) z)))

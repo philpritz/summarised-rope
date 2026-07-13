@@ -1,34 +1,35 @@
 #lang racket
 
 ;; Lisp editing: the cursor's focus as its labeled lexical RUNS, a layer over
-;; zipper-core and the lisp summary. The pipeline is three composed opts:
-;;   zipper-focus   the INDEXED focus (this file's default, replacing zipper-core's
-;;                  in the re-export) -- view (values fr bs as): the focus rope
-;;                  flanked by its two summaries; the put IS zipper-core's own, so
-;;                  writes are identical and the widening is get-side only
-;;   split-runs     (fr bs as) -> (values frs bss ass): the head triple PLURALIZED
-;;                  -- run pieces, each with its own flanking summaries
-;;   label-runs     (frs bss ass) -> (values frs labels): `label` mapped pointwise
-;;   typed-runs     the composition of the three
-;;   label          (bs fr as) -> class: judge ONE contiguous run in context
-;; Pieces stay ROPES through the views; a put may hand back ropes or strings --
+;; zipper-core and the lisp summary, in the STAGED (g*) protocol. The pipeline is a
+;; compose-stage chain:
+;;   zipper-focus/g the focus rope focal, its flanking summaries (bs as) on the bus
+;;                  (zipper-core's own staged optic)
+;;   split-runs     a CONFIGURED stage (lambda ((bs as) fr) ...): the head triple
+;;                  PLURALIZED -- world fr -> foci frs (run pieces), renders (bss ass)
+;;                  (each piece's own flanking summaries) back onto the bus
+;;   labeled-run    a row POLICY (ctx = (bs as), world = (fr)) judging ONE piece:
+;;                  focus fr, its `label` on the bus
+;;   label-runs     (stage-list labeled-run): the policy at every piece
+;;   typed-runs     the chain -- (as-stage label-runs) bridges the flat policy in
+;;   label          (bs fr as) -> class: judge ONE contiguous run in context (scalar)
+;; Pieces stay ROPES through the reads; a put may hand back ropes or strings --
 ;; (make-rope smr) coerces strings and passes ropes through (structure shared, so
-;; untouched pieces are never re-leafed). Labels and flanks are read-only context
-;; on the values channel: transforms see them, puts never consume them.
+;; untouched pieces are never re-leafed). Labels and flanks ride the render BUS: a
+;; reading/update consumer sees them, the put never consumes them.
 
 (require racket/match
          "../rope-core.rkt"
          (submod "../rope-core.rkt" experimental)                ; frame-guide*, multisect*
          "../summaries/lisp-summary.rkt"                         ; lisp-smr, class-sides
          (submod "../summaries/lisp-summary.rkt" experimental)   ; lisp-runs-guide*
-         "../zipper-core.rkt"                                    ; the machine; zipper-focus widened below
-         "../toolbox/main.rkt")                               ; opt, arg
+         "../zipper-core.rkt"                                    ; the machine; zipper-focus/g, zipper-guides
+         "../toolbox/main.rkt"                                   ; the stage ops, stage-list, as-stage, focal/g
+         (submod "../toolbox/algebra.rkt" experimental))         ; the curried `lambda` -- (lambda ((bs as) fr) ...)
 
 (provide label labeled-run split-runs label-runs typed-runs
          lisp-runs-guide* multisect*                          ; the splitter, usable bare
-         (rename-out [zipper-focus* zipper-focus]             ; the indexed focus, as default
-                     [zipper-guide* zipper-guide])            ; the indexed guide list, ditto
-         (except-out (all-from-out "../zipper-core.rkt") zipper-focus zipper-guide)
+         (all-from-out "../zipper-core.rkt")                  ; the staged optics ride through
          (all-from-out "../summaries/lisp-summary.rkt")
          (all-from-out "../rope-core.rkt"))
 
@@ -44,72 +45,46 @@
          (or c2 'hash)]
         [else c]))
 
-;; ---------- the indexed focus ----------
-;; zipper-focus, widened to view (values fr bs as): the focus rope stays focal, the
-;; flanking summaries ride behind as read-only context. The put is zipper-focus's
-;; own -- set never sees context -- so every write path is untouched.
-(define zipper-focus*
-  (opt-from-peek
-   (lambda (z)
-     (define-values (bs _r0) ((edge-view 0) z))                    ; before the focus
-     (define-values (_l1 as) ((edge-view 1) z))                    ; after the focus
-     (values (lambda (fr* . _) (((opt-set zipper-focus) fr*) z))   ; the flanks are read-only
-             ((opt-get zipper-focus) z) bs as))))
-
-;; ---------- the indexed guide list ----------
-;; zipper-guide, widened to view (values guides Ls Rs): the guide list stays focal;
-;; behind it ride two parallel lists giving each edge's cut -- Ls[i] / Rs[i] are the
-;; summaries left and right of edge i (what edge-sides i reads, both edges at once,
-;; aligned with the guides). The put is zipper-guide's own: new guides re-navigate,
-;; the cuts are derived and unwritable. A transform hence maps cuts to guides --
-;; sexp-edit's reguide as one opt-update.
-(define zipper-guide*
-  (opt-from-peek
-   (lambda (z)
-     (define-values (L0 R0) ((edge-view 0) z))
-     (define-values (L1 R1) ((edge-view 1) z))
-     (values (lambda (gs* . _) (((opt-set zipper-guide) gs*) z))   ; the cuts are read-only
-             ((opt-get zipper-guide) z)
-             (list L0 L1)
-             (list R0 R1)))))
-
 ;; ---------- split-runs: the head triple, pluralized ----------
-;; world (fr bs as) -> view (values frs bss ass): the piece ROPES focal, each piece's
-;; own flanking summaries behind (a prefix and a suffix scan, seeded by the real
-;; flanks; the guide is framed with them too, so the CUTS are context-true). The put
-;; rejoins new pieces through (make-rope smr) -- built with the zipper's smr, since
-;; rope-join takes its algebra off the left operand.
+;; a CONFIGURED stage: config (bs as) off the bus, world fr. Foci = the piece ROPES
+;; frs; renders = each piece's own flanking summaries (bss ass), a prefix and a suffix
+;; scan seeded by the real flanks (the guide is framed with them too, so the CUTS are
+;; context-true). The put rejoins new pieces through (make-rope smr) -- built with the
+;; zipper's smr, since rope-join takes its algebra off the left operand.
 (define (split-runs smr)
   (define build (make-rope smr))
-  (opt-from-peek
-   (lambda (fr bs as)
-     (define bs* (lisp-smr bs))                           ; normalize (bundle -> slot)
-     (define as* (lisp-smr as))
-     (define frs ((multisect* (frame-guide* lisp-runs-guide* bs* as*)) fr))
-     (values (lambda (frs* . _) (apply build frs*))
-             frs
-             (for/fold ([b bs*] [acc '()] #:result (reverse acc)) ([p (in-list frs)])
-               (values (lisp-smr b p) (cons b acc)))
-             (for/fold ([a as*] [acc '()] #:result acc) ([p (in-list (reverse frs))])
-               (values (lisp-smr p a) (cons a acc)))))))
+  (lambda ((bs as) fr)
+    (define bs* (lisp-smr bs))                           ; normalize (bundle -> slot)
+    (define as* (lisp-smr as))
+    (define frs ((multisect* (frame-guide* lisp-runs-guide* bs* as*)) fr))
+    (define bss (for/fold ([b bs*] [acc '()] #:result (reverse acc)) ([p (in-list frs)])
+                  (values (lisp-smr b p) (cons b acc))))
+    (define ass (for/fold ([a as*] [acc '()] #:result acc) ([p (in-list (reverse frs))])
+                  (values (lisp-smr p a) (cons a acc))))
+    (values (lambda (c) ((c bss ass) frs))               ; renders (bss ass), focus frs
+            (lambda (frs*) (apply build frs*)))))
 
 ;; ---------- labeled-run: ONE piece, judged in its context ----------
-;; world (fr bs as) -> view (values fr class): the piece focal, its label behind.
-;; The put consumes a new piece (rope or string) alone; the flanks are read-only.
+;; a row POLICY (curried stage) for stage-list: (staged-apply labeled-run ctx wr) with
+;; ctx = (bs as), wr = (fr). Focus = the piece fr, its label on the bus; the put consumes
+;; a new piece alone.
 (define labeled-run
-  (opt-from-peek
-   (lambda (fr bs as) (values (lambda (p . _) p) fr (label bs fr as)))))
+  (lambda* (ctx wr)
+    (match-define (list bs as) ctx)
+    (define fr (car wr))
+    (values (lambda (c) ((c (label bs fr as)) fr))
+            (lambda (p) p))))
 
 ;; ---------- label-runs: judge each piece in its own context ----------
-;; The elementwise lift of labeled-run: world (frs bss ass) -> view (values frs
-;; labels), the put consuming a list of new pieces (ropes or strings; split-runs'
-;; build coerces). One opt-list, no threading of its own.
-(define label-runs (opt-list labeled-run))
+;; the elementwise lift of labeled-run over the pieces (world) and their flanks (bus):
+;; foci = the pieces, renders = the labels. One stage-list, no threading of its own.
+(define label-runs (stage-list labeled-run))
 
 ;; ---------- the composition ----------
 ;; smr = the algebra the zipper's rope is built with (defaults to bare lisp-smr).
+;; (as-stage label-runs) bridges the flat row policy into the compose-stage chain.
 (define (typed-runs [smr lisp-smr])
-  (compose-opt zipper-focus* (split-runs smr) label-runs))
+  (compose-stage zipper-focus/g (split-runs smr) (as-stage label-runs)))
 
 ;; ============================================================================
 (module+ test
@@ -118,7 +93,7 @@
   (define bsmr (bundle lisp-smr char-smr))
   (define ((char-at n) L R) (let ([c (char-smr L)]) (cond [(< c n) 1] [(> c n) -1] [else 0])))
   (define (cursor rope i j)
-    (((opt-set zipper-guide) (list (char-at i) (char-at j)))
+    (((stage-set zipper-guides) (list (char-at i) (char-at j)))
      (start bsmr rope (char-at i) (char-at j))))
   (define doc ((make-rope bsmr) "(a \"one two\" b ; c\n(d \"three\"))"))
   (define runs (typed-runs bsmr))
@@ -132,75 +107,75 @@
   (check-eq? (label (lisp-smr "x")      "#"       (lisp-smr ""))      'hash)    ; glue to doc end
   (check-eq? (label (lisp-smr "x")      ""        (lisp-smr "y"))     #f)       ; empty focus
 
-  ;; --- labeled-run: the one-piece stage, scalar ---
-  (check-equal? (call-with-values
-                  (lambda () ((opt-get labeled-run) "; c\n" (lisp-smr "(a ") (lisp-smr "b)")))
-                  list)
-                (list "; c\n" 'comment))
-  (check-equal? (((opt-set labeled-run) "x") "; c\n" (lisp-smr "(a ") (lisp-smr "b)")) "x")
+  ;; --- labeled-run: the one-piece policy (ctx = (bs as), world = (fr)) ---
+  (let-values ([(g p) (staged-apply labeled-run (list (lisp-smr "(a ") (lisp-smr "b)")) (list "; c\n"))])
+    (check-equal? (g (pure values)) "; c\n")                         ; the piece (focus)
+    (check-eq?    (g pure) 'comment)                                 ; its label (on the bus)
+    (check-equal? (p "x") "x"))                                      ; put = identity
 
-  ;; --- the indexed focus: three values out, the ordinary put back in ---
+  ;; --- the indexed focus: reading gives (fr bs as); the put is zipper-focus/g's own ---
   (let ([z (cursor doc 5 26)])
-    (define-values (fr bs as) ((opt-get zipper-focus*) z))
+    (match-define (list fr bs as)
+      ((compose (reading (lambda ((bs as) fr) (list fr bs as))) (enter z)) zipper-focus/g))
     (check-equal? (~a fr) "ne two\" b ; c\n(d \"thr")
-    (check-true  (lisp-in-string? (lisp-smr bs)))                     ; cut sits mid-string
+    (check-true  (lisp-in-string? (lisp-smr bs)))                    ; cut sits mid-string
     (check-true  (lisp-in-string? (lisp-smr (lisp-smr bs) (lisp-smr fr)))))
-  (let ([z (cursor doc 5 8)])                                         ; the put: zipper-focus's own
-    (check-equal? (~a ((opt-get zipper-focus) (to-root (((opt-set zipper-focus*) "X") z))))
+  (let ([z (cursor doc 5 8)])
+    (check-equal? (~a ((stage-get zipper-focus/g) (to-root (((stage-set zipper-focus/g) "X") z))))
                   "(a \"oXtwo\" b ; c\n(d \"three\"))"))
 
   ;; --- typed-runs, context-true: the focus starts INSIDE the string ---
   (let ([z (cursor doc 5 26)])
-    (define-values (ps ls) ((opt-get runs) z))
+    (define-values (ps ls)
+      ((compose (reading (lambda ((ls) ps) (values ps ls))) (enter z)) runs))  ; renders=labels, foci=pieces
     (check-equal? ls '(string code comment code string))
     (check-equal? (map ~a ps) '("ne two\"" " b " "; c\n" "(d " "\"thr")))
 
   ;; --- whole document: labels; a type-directed edit with a MIXED put ---
-  ;; un-navigated start: the focus is the whole rope, and the gap-at-0 guides stay
-  ;; valid when the edit SHRINKS the document (a guide past the new end cannot
-  ;; re-navigate -- the scratch demos dodged that by luck)
   (let ([z (start bsmr doc (char-at 0) (char-at 0))])
-    (define-values (ps ls) ((opt-get runs) z))
+    (define-values (ps ls)
+      ((compose (reading (lambda ((ls) ps) (values ps ls))) (enter z)) runs))
     (check-equal? ls '(code string code comment code string code))
-    (check-true (andmap rope? ps))                                    ; pieces stay ropes
-    (define z* ((opt-update runs
-                  (lambda (ps ls)                                     ; ropes back + one string
-                    (for/list ([p ps] [l ls]) (if (eq? l 'comment) "" p))))
-                z))
-    (check-equal? (~a ((opt-get zipper-focus) (to-root z*)))
+    (check-true (andmap rope? ps))                                   ; pieces stay ropes
+    (define z* ((compose (writing (lambda ((ls) ps)                  ; ropes back + one string
+                                    (for/list ([p ps] [l ls]) (if (eq? l 'comment) "" p))))
+                         (enter z)) runs))
+    (check-equal? (~a ((stage-get zipper-focus/g) (to-root z*)))
                   "(a \"one two\" b (d \"three\"))"))
 
-  ;; --- the indexed guide list: (values guides Ls Rs), aligned by edge ---
+  ;; --- the guide list: reading gives (guides Ls Rs), aligned by edge ---
   (let ([z (cursor doc 5 26)])
-    (define-values (gs Ls Rs) ((opt-get zipper-guide*) z))
+    (define gs ((stage-get zipper-guides) z))
+    (define-values (Ls Rs) ((stage-view zipper-guides) z))
     (check-equal? (length gs) 2)
-    (check-equal? (map char-smr Ls) '(5 26))                          ; chars left of each edge
-    (check-equal? (map char-smr Rs) '(26 5))                          ; chars right of each edge
-    (check-true  (lisp-in-string? (lisp-smr (car Ls))))               ; edge 0: inside "one two"
-    (check-true  (lisp-in-string? (lisp-smr (cadr Ls))))              ; edge 1: inside "three"
-    (check-eq?   (lisp-state (lisp-smr (lisp-smr (car Ls)) (lisp-smr (car Rs)) )) 'code)
+    (check-equal? (map char-smr Ls) '(5 26))                         ; chars left of each edge
+    (check-equal? (map char-smr Rs) '(26 5))                         ; chars right of each edge
+    (check-true  (lisp-in-string? (lisp-smr (car Ls))))              ; edge 0: inside "one two"
+    (check-true  (lisp-in-string? (lisp-smr (cadr Ls))))             ; edge 1: inside "three"
+    (check-eq?   (lisp-state (lisp-smr (lisp-smr (car Ls)) (lisp-smr (car Rs)))) 'code)
     ;; a cut-driven guide rewrite: collapse the cursor onto its own start edge
-    (let ([z* ((opt-update zipper-guide*
-                 (lambda (gs Ls Rs) (list (car gs) (car gs)))) z)])
-      (check-equal? (~a ((opt-get zipper-focus) z*)) "")
+    (let ([z* ((compose (writing (lambda ((Ls Rs) gs) (list (car gs) (car gs))))
+                        (enter z)) zipper-guides)])
+      (check-equal? (~a ((stage-get zipper-focus/g) z*)) "")
       (check-equal? (char-smr ((compose (lambda (L R) L) (edge-view 0)) z*)) 5))
-    ;; the row lifts ride the parallel lists: (opt-lref i focal) = edge i's guide
-    ;; WITH its cut in view, the guide alone writable
-    (define edge0 (compose-opt zipper-guide* (opt-lref 0 focal)))
-    (define-values (_g L0 R0) ((opt-get edge0) z))
+    ;; the row lifts ride the bus: (stage-lref i focal/g) = edge i's guide WITH its cut
+    (define edge0 (compose-stage zipper-guides (as-stage (stage-lref 0 focal/g))))
+    (define-values (L0 R0) ((stage-view edge0) z))
     (check-equal? (char-smr L0) 5)
     (check-equal? (char-smr R0) 26)
-    ;; move edge 0 alone (the put writes the focal guide back into the list)
-    (let ([z* (((opt-set edge0) (char-at 7)) z)])
-      (check-equal? (~a ((opt-get zipper-focus) z*)) " two\" b ; c\n(d \"thr"))
-    ;; the diagonal collapses the cursor onto edge 1, cut context in view
-    (let ([z* (((opt-set (compose-opt zipper-guide* (opt-ldiag 1 focal))) (char-at 12)) z)])
-      (check-equal? (~a ((opt-get zipper-focus) z*)) "")
+    ;; move edge 0 alone (the put writes the focal guide back into the pair)
+    (let ([z* (((stage-set edge0) (char-at 7)) z)])
+      (check-equal? (~a ((stage-get zipper-focus/g) z*)) " two\" b ; c\n(d \"thr"))
+    ;; the diagonal collapses the cursor onto edge 1, cut context on the bus
+    (let ([z* (((stage-set (compose-stage zipper-guides (as-stage (stage-ldiag 1 focal/g)))) (char-at 12)) z)])
+      (check-equal? (~a ((stage-get zipper-focus/g) z*)) "")
       (check-equal? (char-smr ((compose (lambda (L R) L) (edge-view 0)) z*)) 12)))
 
   ;; --- the middle stage alone: pieces with their per-piece contexts ---
   (let ([z (cursor doc 0 (char-smr doc))])
-    (define-values (frs bss ass) ((opt-get (compose-opt zipper-focus* (split-runs bsmr))) z))
+    (define-values (frs bss ass)
+      ((compose (reading (lambda ((bss ass) frs) (values frs bss ass))) (enter z))
+       (compose-stage zipper-focus/g (split-runs bsmr))))
     (check-equal? (length frs) 7)
-    (check-eq? (lisp-state (list-ref bss 1)) 'code)                   ; before "one two"
+    (check-eq? (lisp-state (list-ref bss 1)) 'code)                  ; before "one two"
     (check-eq? (label (list-ref bss 3) (list-ref frs 3) (list-ref ass 3)) 'comment)))

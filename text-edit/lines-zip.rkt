@@ -34,14 +34,17 @@
 (require racket/match
          "../rope-core.rkt"
          (submod "../rope-core.rkt" experimental)             ; multisect*
-         "../zipper-core.rkt"                                 ; start, zipper-guide/-focus, edge-view, to-root, opt ops
+         "../zipper-core.rkt"                                 ; start, zipper-guides, zipper-focus/g, edge-view, to-root
          "../summaries/summaries.rkt"                         ; linecol-smr, linecol, linecol-lines
          (submod "../summaries/summaries.rkt" experimental)   ; newline-guide*
-         "../toolbox/main.rkt")                               ; spl
+         "../toolbox/main.rkt"                                ; spl, spl->stage, reading/writing, enter, scanl/scanr, stage ops, pure
+         (submod "../toolbox/algebra.rkt" experimental)       ; the curried `lambda` -- (lambda ((L R) g) ...)
+         "lisp-view.rkt")                                     ; split-runs, label-runs, lisp-smr -- the syntax render base
 
 (provide open-lines-zip scroll lines-zip-window lines-zip-row lines-zip-height
          guide-row focus-line-at focus-top focus-bottom focus-frame
-         lines-spl lines-zip->zipper zipper->lines-zip lines-zip=?)
+         lines-spl lines-zip->zipper zipper->lines-zip lines-zip=?
+         scan lines-runs window-lens)
 
 ;; ---------- the frame guide ----------
 ;; the cut at row r's start, clamped to the document end.
@@ -54,11 +57,19 @@
         [(and (= h2 0) (= l2 0) (= c2 0)) 0]                 ; l < r but the doc ends here
         [else 1]))
 
+;; ---------- optic access, in the reading/writing idiom (sexp-edit style) ----------
+;; focus-rope: the focus rope off the staged zipper-focus/g (its flanks ride the bus, ignored).
+(define (focus-rope z)
+  ((compose (reading (lambda ((_bs _as) fr) fr)) (enter z)) zipper-focus/g))
+;; put-guides: install both guides (a constant pair) and re-navigate -- the write ignores the cut.
+(define (put-guides z gs)
+  ((compose (writing (lambda ((_Ls _Rs) _pair) gs)) (enter z)) zipper-guides))
+
 ;; navigate z to rows [a, b) -> (values z* line-ropes); empty range -> no lines.
 (define (fetch z a b)
   (if (>= a b) (values z '())
-      (let ([z* (((opt-set zipper-guide) (list (row-at a) (row-at b))) z)])
-        (values z* ((multisect* newline-guide*) ((opt-get zipper-focus) z*))))))
+      (let ([z* (put-guides z (list (row-at a) (row-at b)))])
+        (values z* ((multisect* newline-guide*) (focus-rope z*))))))
 
 (define (take-range lst a b)                                 ; [a, b) of lst, indices clamped
   (let* ([len (length lst)] [a* (max 0 (min a len))] [b* (max a* (min b len))])
@@ -80,7 +91,7 @@
 
 ;; open a window of h lines at row n0; the buffer pads s rows each side
 (define (open-lines-zip z n0 h [s h])
-  (define rows (add1 (linecol-lines (linecol-smr ((opt-get zipper-focus) (to-root z))))))
+  (define rows (add1 (linecol-lines (linecol-smr (focus-rope (to-root z))))))
   (define buf-lo (max 0 (- n0 s)))
   (define buf-hi (min rows (+ n0 h s)))
   (define-values (z* lines) (fetch z buf-lo buf-hi))
@@ -109,7 +120,7 @@
 ;; gap focus (g g), read the row off the before flank -- (values row z*), the
 ;; navigated zipper returned so a caller reopens from nearby, not from cold
 (define (guide-row lz g)
-  (define z* (((opt-set zipper-guide) (list g g)) (lines-zip-zip lz)))
+  (define z* (put-guides (lines-zip-zip lz) (list g g)))
   (define-values (bs _r) ((edge-view 0) z*))
   (values (linecol-lines (linecol-smr bs)) z*))
 
@@ -126,7 +137,7 @@
 ;; navigate to the region [g0, g1): its first line at the top, the window sized to
 ;; every line the region touches -- the retraction does the rounding-out
 (define (focus-frame lz g0 g1)
-  (zipper->lines-zip (((opt-set zipper-guide) (list g0 g1)) (lines-zip-zip lz))))
+  (zipper->lines-zip (put-guides (lines-zip-zip lz) (list g0 g1))))
 
 ;; ---------- the spl: zipper <-> lines-zip ----------
 ;; The lines-zip is a RETRACT of the zipper. The section loses nothing -- its image
@@ -141,8 +152,8 @@
 ;; the section: re-guide the carried zipper to the WINDOW's rows
 (define (lines-zip->zipper lz)
   (define n (lines-zip-row lz))
-  (((opt-set zipper-guide) (list (row-at n) (row-at (+ n (lines-zip-height lz)))))
-   (lines-zip-zip lz)))
+  (put-guides (lines-zip-zip lz)
+              (list (row-at n) (row-at (+ n (lines-zip-height lz))))))
 
 ;; the retraction: the cursor's row extent off the edge summaries, expanded
 ;; outward to whole lines, opened as a viewport -- the guides forgotten here
@@ -161,6 +172,33 @@
   (and (= (lines-zip-row a) (lines-zip-row b))
        (= (lines-zip-height a) (lines-zip-height b))
        (equal? (map ~a (lines-zip-window a)) (map ~a (lines-zip-window b)))))
+
+;; ---------- the lisp render: colour the window's lines ----------
+;; The scroll path stays on linecol; the syntax layer (lisp-view's optics) colours the visible
+;; lines on demand. scan/lines-runs are list-generic; window-lens focuses a lines-zip.
+
+;; scan: index (bs as) + world = the list of lines -> per-line flanks (bss ass) on the bus, the
+;; lines as foci. (lisp-view's split-lines with the multisect dropped -- the lines are split.)
+(define (scan smr)
+  (lambda ((bs as) lines)
+    (values (lambda (c) ((c (drop-right (scanl smr bs lines) 1)
+                            (cdr        (scanr smr as lines))) lines))
+            (lambda (lines*) lines*))))
+
+;; lines-runs: a list of lines -> per-line typed runs. index = (bs as), the lisp state at the
+;; window's edges; world = the lines. Scan each line's flanks, then split + label it.
+(define (lines-runs smr)
+  (compose-stage (scan smr)
+                 (stage-list (compose-stage (split-runs smr) label-runs))))
+
+;; window-lens: the optic onto a lines-zip -- focus = the window lines (re-leafed under smr), the
+;; seed flanks (bs as) on the bus. Compose before lines-runs to render a lines-zip end to end;
+;; the put reinstalls edited lines into the window (read path only for now).
+(define (window-lens smr [bs (smr "")] [as (smr "")])
+  (pure (lambda (lz)
+    (values (lambda (c) ((c bs as)
+                         (map (lambda (l) ((make-rope smr) (~a l))) (lines-zip-window lz))))
+            (lambda (_lines*) lz)))))
 
 ;; ============================================================================
 (module+ test
@@ -243,7 +281,7 @@
 
   ;; --- the spl ---
   (define lr lines-spl)
-  (define (focus-text z) (~a ((opt-get zipper-focus) z)))
+  (define (focus-text z) (~a (focus-rope z)))
 
   ;; the spl law: from . to = id, on the lines-zip=? quotient -- including after a
   ;; within-slack scroll, where the round trip recenters only the buffer (cache)
@@ -259,18 +297,30 @@
   ;; e = to . from: the expansion -- outward to whole lines, idempotent; a point
   ;; cursor covers its containing line
   (define e (spl-normalize lr))
-  (define z-mid (((opt-set zipper-guide) (list (at-rowcol 7 2) (at-rowcol 8 4))) z))
+  (define z-mid (put-guides z (list (at-rowcol 7 2) (at-rowcol 8 4))))
   (check-equal? (focus-text z-mid) "ine 7)\n(lin")
   (check-equal? (focus-text (e z-mid)) "(line 7)\n(line 8)\n")
   (check-equal? (focus-text (e (e z-mid))) (focus-text (e z-mid)))
-  (check-equal? (focus-text (e (((opt-set zipper-guide) (list (at-rowcol 7 2) (at-rowcol 7 2))) z)))
+  (check-equal? (focus-text (e (put-guides z (list (at-rowcol 7 2) (at-rowcol 7 2)))))
                 "(line 7)\n")
 
   ;; worn as an opt: world = zipper, focus = lines-zip -- scrolling as an EDIT,
   ;; PutGet exact, a bare run applies e
-  (define ro (spl->opt lr))
-  (check-equal? (rows ((opt-get ro) z-mid)) '("(line 7)" "(line 8)"))
-  (check-equal? (focus-text ((opt-update ro (lambda (v) (scroll v 5))) z-mid))
+  (define ro (spl->stage lr))
+  (check-equal? (rows ((stage-get ro) z-mid)) '("(line 7)" "(line 8)"))
+  (check-equal? (focus-text ((stage-update ro (lambda (v) (scroll v 5))) z-mid))
                 "(line 12)\n(line 13)\n")
-  (check-true (lines-zip=? ((opt-get ro) (((opt-set ro) lz) z-mid)) lz))
-  (check-equal? (focus-text (ro z-mid)) "(line 7)\n(line 8)\n"))
+  (check-true (lines-zip=? ((stage-get ro) (((stage-set ro) lz) z-mid)) lz))
+  (check-equal? (focus-text (recompose ro z-mid)) "(line 7)\n(line 8)\n")
+
+  ;; --- the lisp render: window-lens (x) lines-runs colours the visible lines ---
+  ;; a string spanning a line boundary -- row 1's "y\"" stays STRING (context carried)
+  (let* ([sdoc ((make-rope linecol-smr) "(a \"x\ny\" b)\n(c d)")]
+         [sz   (start linecol-smr sdoc (row-at 0) (row-at 0))]
+         [lz2  (open-lines-zip sz 0 3 1)])
+    (define-values (rrows rtypes)
+      ((compose (reading (lambda (types) (lambda (rows) (values rows types)))) (enter lz2))
+       (compose-stage (window-lens lisp-smr) (lines-runs lisp-smr))))
+    (check-equal? (map (lambda (r) (map ~a r)) rrows)
+                  '(("(a " "\"x\n") ("y\"" " b)\n") ("(c d)")))
+    (check-equal? rtypes '((code string) (string code) (code)))))

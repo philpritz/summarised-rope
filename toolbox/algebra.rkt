@@ -1,14 +1,14 @@
 #lang racket
 
-;; Small algebraic helpers -- retracts/isos, store-shaped optics, and a few
+;; Small algebraic helpers -- retracts/isos (spl/iso) and a few value/list
 ;; combinators -- each documented at its definition (the canonical home other files
 ;; point to; the provide list is the surface map). Intended as a reusable helper
 ;; library, so some surface is built out past what this project strictly needs.
-;; Narrative -- the iso group law, the optic protocol, the inlining rationale -- in
-;; scribble/algebra.scrbl (pre-dates this store-shaped generation). Its successor,
-;; the staged optic, is toolbox/stage.rkt; this generation and the record-opt one
-;; before it are snapshot in toolbox/old, the van Laarhoven one in
-;; deprecated/deprecated-7.
+;; The store-shaped `opt` optic that once lived here was RETIRED 2026-07-12, its
+;; consumers moved to toolbox/stage.rkt's staged optic; the whole store-shaped
+;; generation is snapshot in toolbox/old/algebra-store-shaped.rkt (the record-opt one
+;; before it in toolbox/old too, the van Laarhoven one in deprecated/deprecated-7).
+;; Narrative -- the iso group law, the inlining rationale -- in scribble/algebra.scrbl.
 
 (provide (struct-out spl)       ; (spl to from): a SPLITTING -- section `to` (embeds),
                                  ;   retraction `from` (may lose), law (from . to) = id;
@@ -22,31 +22,9 @@
          compose-iso             ; compose any number of isos; inverses reversed
          expt-iso                ; integer powers of an iso (scmutils function arithmetic)
          iso-law? check-iso-laws ; = the spl law (from . to), kept under its old name
-         (struct-out opt)        ; (opt peek view): the store-shaped optic -- peek is the
-                                 ;   forward half of w <-> (put . foci); view the pure
-                                 ;   render channel. Callable = recompose (id | normalize)
-         opt-from-peek           ; peek [view] -> opt (put-first peek, as ever)
-         opt-get opt-set         ; the projections: foci of the peek / feed the put
-         opt-get*                ; the widened read: foci then renders
-         opt-update              ; (opt-update o f): an edit as a DERIVED COMMAND --
-                                 ;   one peek; f sees (foci .. renders ..), returns news
-         compose-opt             ; compose any number of opts, outer to inner; () = identity
-         no-view view-join       ; the viewer monoid: unit (zero values) and append (splice)
-         attach-viewer           ; join pure WORLD-renders onto an opt's view channel
-         iso->opt                ; an iso worn as an opt -- view along `to`, put = `from`
-                                 ;   (the put ignores the original -- that absence IS the iso)
-         spl->opt                ; a spl worn as an opt -- view along `from` (the lossy
-                                 ;   half), put = `to`; PutGet = the spl law, GetPut = e
-         list-of                 ; map an element opt over a list -- ONE focus
-                                 ;   (parallel lists: first focal, rest mapped context)
-         lref                    ; index a list, fanning to N foci; length-safe
-         ldiag                   ; the list diagonal -- view i, put broadcasts to all
-         opt-lref opt-ldiag      ; row lifts over PARALLEL lists: a policy opt on the row,
-                                 ;   signature-transparent (put returns P's output, listified)
-         opt-list                ; the elementwise lift: P at EVERY index, all components listified
-         focal                   ; the first-value-focal row policy (rest = read-only ctx)
-         varg                    ; rearrange the value stream by position
-         vdiag                   ; the value-stream diagonal -- view i, put broadcasts to all (ldiag on values)
+         ;; The store-shaped `opt` family (opt / opt-get / ... / list-of / opt-list / focal /
+         ;; varg / vdiag) was retired 2026-07-12 -- succeeded by toolbox/stage.rkt's staged
+         ;; optic; the whole store-shaped generation is snapshot in toolbox/old/algebra-store-shaped.rkt.
          pure                    ; (pure v ...): the constant fn, ignoring its args and returning the v ... as values (K)
          on                      ; (on op f) a ... = (op (f a) ...) -- Haskell's `on`
          arg                     ; project args by 0-based position
@@ -113,196 +91,6 @@
 (define (check-spl-laws r xs) (filter (lambda (x) (not (spl-law? r x))) xs))
 (define iso-law? spl-law?)
 (define check-iso-laws check-spl-laws)
-
-;; ---------- the optic ----------
-;; opt: the store-shaped optic, as two pure fields:
-;;   peek : ws ... -> (values put foci ...)   ; the forward half of w <-> (put . foci) --
-;;                                            ;   put-back FIRST, then foci (why: scribble)
-;;   view : ws ... -> (values render ...)     ; ONE pure viewer over the WORLD; zero+
-;;                                            ;   values, read-only, never in the put path
-;; get/set are PROJECTIONS of the peek (foci / feed-the-put), not stored; an edit is
-;; a DERIVED COMMAND (opt-update). Applying an opt bare RECOMPOSES: the put fed its
-;; own foci -- the identity for a lawful lens/iso, the normalization e for a retract.
-;; The bare run never touches the view channel, so unread renders cost nothing.
-(define (peek-call peek ws)                     ; -> (values put foci-list)
-  (call-with-values (lambda () (apply peek ws))
-                    (lambda (put . foci) (values put foci))))
-(define (value-list f ws) (call-with-values (lambda () (apply f ws)) list))
-
-(struct opt (peek view)
-  #:property prop:procedure
-  (lambda (o . ws)
-    (define-values (put foci) (peek-call (opt-peek o) ws))
-    (apply put foci)))
-
-;; the viewer monoid: no-view (zero values) is the unit, view-join the append --
-;; renders spliced in order. attach-viewer is its append onto an opt's channel.
-(define (no-view . _ws) (values))
-(define ((view-join . views) . ws)
-  (apply values (append* (map (lambda (v) (value-list v ws)) views))))
-(define (attach-viewer o . vs)
-  (struct-copy opt o [view (apply view-join (opt-view o) vs)]))
-
-(define (opt-from-peek peek [view no-view]) (opt peek view))
-
-;; the projections
-(define ((opt-get o) . ws)
-  (define-values (_put foci) (peek-call (opt-peek o) ws))
-  (apply values foci))
-(define ((opt-set o) . news)
-  (lambda ws
-    (define-values (put _foci) (peek-call (opt-peek o) ws))
-    (apply put news)))
-(define ((opt-get* o) . ws)                      ; the widened read: foci then renders
-  (define-values (_put foci) (peek-call (opt-peek o) ws))
-  (apply values (append foci (value-list (opt-view o) ws))))
-
-;; opt-update: an edit as a derived command -- ONE peek serves read and write; the
-;; transform sees the widened stream (foci then renders) and returns what put consumes.
-(define ((opt-update o f) . ws)
-  (define-values (put foci) (peek-call (opt-peek o) ws))
-  (apply put (value-list f (append foci (value-list (opt-view o) ws)))))
-
-;; compose-opt: outer to inner, variadic; (compose-opt) = the identity opt (focus =
-;; the world). The inner's world is the outer's FOCI -- context foci ride through to
-;; the leaf -- the puts chain, and the view channels JOIN: the inner's viewer (its
-;; world is the outer view) precomposed with the outer get, riding nearest the foci,
-;; then the outer's own.
-(define identity-opt (opt (lambda ws (apply values (lambda news (apply values news)) ws))
-                          no-view))
-(define (compose-opt2 b1 b2)
-  (opt (lambda ws
-         (define-values (put1 v1) (peek-call (opt-peek b1) ws))
-         (define-values (put2 v2) (peek-call (opt-peek b2) v1))
-         (apply values
-                (lambda news (apply put1 (value-list put2 news)))
-                v2))
-       (view-join (compose (opt-view b2) (opt-get b1))
-                  (opt-view b1))))
-(define (compose-opt . bs) (foldl (lambda (b acc) (compose-opt2 acc b)) identity-opt bs))
-
-;; iso->opt: an iso worn as an opt -- view is its forward map, put is its backward map. The put
-;; ignores the original structure (only the new focus matters), which is exactly what makes it an
-;; iso rather than a general lens; so (compose-opt some-opt (iso->opt i)) composes with no fuss.
-(define (iso->opt i) (opt-from-peek (lambda (s) (values (iso-from i) (i s)))))
-
-;; spl->opt: a spl worn as an opt, on its CONCRETE side -- view along `from`
-;; (the lossy half), put = `to` (the section; the original ignored, as in iso->opt).
-;; The lens laws split along the spl's: PutGet is the spl law, on the nose;
-;; GetPut degrades to normalize -- a bare run applies e, identity only on the
-;; section's image. The opposite orientation of iso->opt, and forced: viewing along
-;; `to` would need an inverse for `from`, which a mere spl does not have.
-(define (spl->opt r)
-  (opt-from-peek (lambda (w) (values (spl-to r) ((spl-from r) w)))))
-
-;; list-of: a single-focus element opt lifted over a list -- ONE focus (the list of
-;; views); the put rebuilds element-wise. Over SEVERAL parallel lists the further
-;; lists arrive mapped too, as read-only context behind; the put rebuilds the FIRST
-;; list alone. Stays single-value until `lref` fans out.
-(define (list-of el)
-  (opt-from-peek (lambda (xs . more)
-    (apply values
-           (lambda (ys . _) (map (lambda (x y) (((opt-set el) y) x)) xs ys))
-           (map (opt-get el) xs)
-           (map (lambda (l) (map (opt-get el) l)) more)))))
-
-;; lref: index a list at positions `is`, fanning into N foci; the put writes them back
-;; into a copy. Length-safe -- overwrites slots, never reshapes.
-(define (lref . is)
-  (opt-from-peek (lambda (xs)
-    (define v (list->vector xs))
-    (apply values
-           (lambda nf (define w (vector-copy v))
-                      (for ([i (in-list is)] [x (in-list nf)]) (vector-set! w i x))
-                      (vector->list w))
-           (map (lambda (i) (vector-ref v i)) is)))))
-
-;; ldiag: the list diagonal -- view position `i`, put broadcasts one value to every slot.
-;; The collapsing twin of `(lref i)`; lawful only when the slots are already equal.
-(define (ldiag i)
-  (opt-from-peek (lambda (xs) (values (lambda (x) (make-list (length xs) x)) (list-ref xs i)))))
-
-;; ---------- row lifts: parallel lists, policy-driven ----------
-;; opt-lref: apply a ROW opt P at position n across PARALLEL lists -- the world is
-;; P's world with every component wrapped in a list. Signature-transparent: the view
-;; and the news are P's own, and the put returns exactly what P's put returns,
-;; LISTIFIED -- P decides which coordinates change and how many lists come back
-;; (a one-value policy composes under a focal-only outer set; a varg-style policy
-;; returns every list rebuilt; a mismatch is an arity error at the seam, not a
-;; silent drop).
-(define (opt-lref n P)
-  (define (row lists) (map (lambda (l) (list-ref l n)) lists))
-  (opt-from-peek
-   (lambda lists
-     (define r (row lists))
-     (apply values
-            (lambda news
-              (define row* (call-with-values
-                             (lambda () (apply (apply (opt-set P) news) r)) list))
-              (apply values (for/list ([l (in-list lists)] [x (in-list row*)])
-                              (list-set l n x))))
-            (value-list (opt-get P) r)))))
-
-;; opt-ldiag: opt-lref's collapsing twin -- the same signature lift, but each
-;; coordinate P's put returns is BROADCAST along its whole list rather than written
-;; at n. Lawful only when each written list's slots are already equal.
-(define (opt-ldiag n P)
-  (define (row lists) (map (lambda (l) (list-ref l n)) lists))
-  (opt-from-peek
-   (lambda lists
-     (define r (row lists))
-     (apply values
-            (lambda news
-              (define row* (call-with-values
-                             (lambda () (apply (apply (opt-set P) news) r)) list))
-              (apply values (for/list ([l (in-list lists)] [x (in-list row*)])
-                              (make-list (length l) x))))
-            (value-list (opt-get P) r)))))
-
-;; opt-list: lift an opt P to work ELEMENTWISE over parallel lists -- P applied at
-;; every index, zipWith-style. The same signature law as opt-lref, at all indices
-;; at once: P's world, view, news, and put output each with every component wrapped
-;; in a list. (opt-list car-opt) recovers list-of; (opt-list P) over a k-component
-;; world consumes k parallel lists. Assumes non-empty lists (an empty world has no
-;; rows to reveal P's arities).
-(define (opt-list P)
-  (define (rows lists) (if (null? lists) '() (apply map list lists)))   ; transpose
-  (define (per-row f) (lambda (r) (call-with-values (lambda () (apply f r)) list)))
-  (opt-from-peek
-   (lambda lists
-     (define rs (rows lists))
-     (apply values
-            (lambda news
-              (apply values
-                     (rows (map (lambda (r ns) ((per-row (apply (opt-set P) ns)) r))
-                                rs (rows news)))))
-            (rows (map (per-row (opt-get P)) rs))))))
-
-;; focal: the first-value-focal row policy -- view the whole values stream (first
-;; writable, the rest read-only context); the put consumes ONE new first value and
-;; returns it alone. (opt-lref n focal) is hence "edge n's focal slot, its context
-;; in view" -- the common companion to the widened zipper optics.
-(define focal (opt-from-peek (lambda (v . ctx) (apply values (lambda (x . _) x) v ctx))))
-
-;; varg: the opt twin of `arg` -- focus the values at positions `is`, in order; the put
-;; writes them back. Lawful for distinct positions; a repeated position is a lossy
-;; diagonal (put-get fails).
-(define (varg . is)
-  (opt-from-peek (lambda structvals
-    (define v (list->vector structvals))
-    (apply values
-           (lambda nf (define w (vector-copy v))
-                      (for ([i (in-list is)] [x (in-list nf)]) (vector-set! w i x))
-                      (apply values (vector->list w)))
-           (map (lambda (i) (vector-ref v i)) is)))))
-
-;; vdiag: the value-stream diagonal -- view value `i`, the put broadcasts one value to every
-;; position. The value-stream twin of `ldiag` (and the collapsing twin of `varg`); lawful only
-;; when the positions are already equal.
-(define (vdiag i)
-  (opt-from-peek (lambda structvals
-    (values (lambda (x) (apply values (make-list (length structvals) x)))
-            (list-ref structvals i)))))
 
 ;; pure: the constant function, variadic in its result -- (pure v ...) ignores its
 ;; arguments and returns the v ... as values. The K combinator, lifting plain values
@@ -495,10 +283,25 @@
 ;; passed through untouched; only a parenthesised head triggers currying. The
 ;; binder reads like the call site: ((L R) focus) abstracts as
 ;; (lambda (L R) (lambda (focus) e)) -- exactly an ilens rebaser's shape.
+;; `lambda*` reads its whole binder as a SPINE OF STAGES, curried left to right -- one
+;; application per stage. A stage is either a bare identifier or a parenthesised group:
+;;   - bare x            -> a rest stage (%lambda x ...): binds the whole arg LIST of its
+;;                          application;
+;;   - group (x1 ... xn) -> a fixed stage (%lambda (x1 ... xn) ...): binds the args
+;;                          individually; nest one level -- (x) -- for a single arg, and
+;;                          the empty group () expects a zero-arg application.
+;; The spine is a proper list; the empty spine is no stages at all -- just the body.
+;;   (lambda* (a b c d) e)             = (lambda a (lambda b (lambda c (lambda d e))))
+;;   (lambda* ((a1 a2) b (c1 c2) d) e) = (lambda (a1 a2) (lambda b (lambda (c1 c2) (lambda d e))))
+;;   (lambda* (a ()) e)                = (lambda a (lambda () e))
+;; Eliminate with staged-apply -- one list per stage: a bare stage captures its list, a
+;; group stage spreads it. Contrast `lambda` above, which peels only a parenthesised
+;; head and dumps the tail into one flat binder. The `*` is the let*/for* sense -- a
+;; clause list nested into single-clause (here curried) forms -- NOT match*'s sense.
 ;; Self-contained -- delete this submodule to retract.
 (module+ experimental
   (require (only-in racket/base [lambda %lambda]))    ; the genuine lambda, renamed
-  (provide lambda)
+  (provide lambda lambda*)
 
   (define-syntax lambda
     (syntax-rules ()
@@ -507,11 +310,23 @@
       [(_ formals body ...)                           ; flat / rest / kw / optional -> real lambda
        (%lambda formals body ...)]))
 
+  (define-syntax lambda*                              ; a spine of curried stages, left to right
+    (syntax-rules ()
+      [(_ ((f ...))        body ...) (%lambda (f ...) body ...)]                 ; group stage, last  (() = nullary)
+      [(_ ((f ...) . rest) body ...) (%lambda (f ...) (lambda* rest body ...))]  ; group stage, more
+      [(_ (x)              body ...) (%lambda x body ...)]                       ; bare stage, last   (x = the list)
+      [(_ (x . rest)       body ...) (%lambda x (lambda* rest body ...))]        ; bare stage, more
+      [(_ ()               body ...) (let () body ...)]))                        ; no stages -> just the body
+
   ;; staged-apply -- the curried binder's eliminator: one list per stage,
   ;;   (staged-apply f l1 l2 ...) = (apply (apply f l1) l2) ...
+  ;; the final application is in TAIL position, so a stage's (values g put) propagates
+  ;; (a foldl would force each step to one value and drop the second).
   (provide staged-apply)
   (define (staged-apply f . ls)
-    (foldl (lambda (l g) (apply g l)) f ls))
+    (cond [(null? ls) f]
+          [(null? (cdr ls)) (apply f (car ls))]
+          [else (apply staged-apply (apply f (car ls)) (cdr ls))]))
 
   (module+ test
     (require rackunit)
@@ -527,6 +342,14 @@
     (check-equal? (((lambda ((L R) focus) (list L R focus)) 'l 'r) 'f)   ; the rebaser shape
                   '(l r f))
     (check-equal? ((lambda (a b) (+ a b)) 2 5) 7)                        ; flat = ordinary lambda
+
+    ;; lambda* -- a spine of curried stages: a bare stage binds its whole arg LIST, a
+    ;; group binds individually, () expects an empty application
+    (check-equal? (staged-apply (lambda* (a b) (list a b)) '(1 2) '(3 4 5)) '((1 2) (3 4 5)))
+    (check-equal? (staged-apply (lambda* ((a1 a2) b) (list a1 a2 b)) '(1 2) '(9)) '(1 2 (9)))
+    (check-equal? ((lambda* ((x)) (* x x)) 6) 36)                        ; nest for a single arg
+    (check-equal? (((lambda* (a ()) a) 1 2)) '(1 2))                     ; () = a zero-arg stage
+
     (check-equal? (apply (lambda xs xs) '(1 2 3)) '(1 2 3))              ; rest arg, untouched
     (check-equal? ((lambda (x [y 10]) (+ x y)) 5) 15)))                  ; optional arg, untouched
 
@@ -699,138 +522,6 @@
   (check-equal? (call-with-values
                  (lambda () ((fixed (lambda (a b c d e) (values b c d e (min a b c d e)))) 5 4 3 2 1)) list)
                 '(1 1 1 1 1))
-
-  ;; --- opt: a peek worn as an opt (put FIRST), the projections as ops, composition, the laws ---
-  (define fst-opt                           ; an opt onto a list's head (one focus)
-    (opt-from-peek (lambda (xs) (values (lambda (x) (cons x (cdr xs))) (first xs)))))
-  (check-equal? ((opt-get fst-opt) '(1 2 3)) 1)
-  (check-equal? ((compose add1 (opt-get fst-opt)) '(1 2 3)) 2)                     ; fold the view: compose threads it
-  (check-equal? (((opt-set fst-opt) 9) '(1 2 3)) '(9 2 3))
-  (check-equal? ((opt-update fst-opt add1) '(1 2 3)) '(2 2 3))
-  (check-equal? (fst-opt '(1 2 3)) '(1 2 3))                                       ; bare run = RECOMPOSE = identity
-  (check-equal? (((opt-set fst-opt) ((opt-get fst-opt) '(1 2))) '(1 2)) '(1 2))    ; get-put
-  (check-equal? ((opt-get fst-opt) (((opt-set fst-opt) 9) '(1 2))) 9)              ; put-get
-  (check-equal? (((opt-set fst-opt) 8) (((opt-set fst-opt) 9) '(1 2)))              ; put-put
-                (((opt-set fst-opt) 8) '(1 2)))
-  ;; composition chains the puts through the outer's peek: onto first-of-first
-  (define fst-fst (compose-opt fst-opt fst-opt))
-  (check-equal? ((opt-get fst-fst) '((1 2) 3)) 1)
-  (check-equal? (((opt-set fst-fst) 9) '((1 2) 3)) '((9 2) 3))
-  (check-equal? ((opt-get (compose-opt)) 42) 42)                                   ; empty = the identity opt
-  (check-equal? (((opt-set (compose-opt)) 9) 42) 9)
-
-  ;; --- spl->opt / iso->opt: a pair worn as an opt ---
-  (define ro (spl->opt int<-real))                           ; world = real, focus = int
-  (check-equal? ((opt-get ro) 3.7) 4)
-  (check-equal? (((opt-set ro) 10) 3.7) 10.0)
-  (check-equal? ((opt-update ro add1) 3.7) 5.0)              ; 3.7 -> 4 -> 5 -> 5.0
-  (check-equal? (ro 3.7) (e 3.7))                            ; bare run = normalize, NOT id
-  (check-equal? ((opt-get ro) (((opt-set ro) 7) 3.7)) 7)     ; PutGet: the spl law, exact
-  ;; iso->opt views along `to`; on an iso the bare run IS the identity
-  (define io (iso->opt inc))
-  (check-equal? ((opt-get io) 10) 11)
-  (check-equal? (((opt-set io) 7) 99) 6)
-  (check-equal? (io 10) 10)
-
-  ;; --- list-of (one list focus), lref (fan-out to N foci), varg (rearrange by position) ---
-  (define (vlist l . s) (call-with-values (lambda () (apply (opt-get l) s)) list)) ; collect the view's values
-  (define li (list-of (opt-from-peek (lambda (p) (values (lambda (x) (cons x (cdr p))) (car p))))))  ; car-opt over a list
-  (define gl (list (cons 1 'g) (cons 2 'g) (cons 3 'g)))
-  (check-equal? (vlist li gl) (list '(1 2 3)))                      ; list-of is ONE focus: the list
-  (check-equal? (((opt-set li) (list 10 20 30)) gl)
-                (list (cons 10 'g) (cons 20 'g) (cons 30 'g)))
-  (define L (compose-opt li (lref 0 2)))
-  (check-equal? (vlist L gl) '(1 3))                               ; lref fans to N foci
-  (check-equal? (((opt-set L) 'X 'Y) gl) (list (cons 'X 'g) (cons 2 'g) (cons 'Y 'g)))
-  (check-equal? ((opt-update L (lambda (a b) (values (add1 a) (add1 b)))) gl)      ; one f over the whole view
-                (list (cons 2 'g) (cons 2 'g) (cons 4 'g)))
-  (check-equal? (length (((opt-set L) 'X) gl)) 3)                  ; under-supplied: length preserved
-  (check-equal? (vlist L (((opt-set L) 'X 'Y) gl)) '(X Y))         ; put-get
-  (check-equal? (vlist (compose-opt li (lref 0 1 2) (varg 2 0)) gl) '(3 1))        ; varg reorders
-  (check-equal? (vlist (compose-opt li (lref 0 1 2) (varg 2 0)) gl)
-                (call-with-values (lambda () ((arg 2 0) 1 2 3)) list))            ; the view of varg = arg
-
-  ;; ldiag: view position i (the bias), the put broadcasts one value to every slot
-  (check-equal? ((opt-get (ldiag 0)) '(a b c)) 'a)
-  (check-equal? ((opt-get (ldiag 1)) '(a b c)) 'b)
-  (check-equal? (((opt-set (ldiag 0)) 'X) '(a b c)) '(X X X))
-  (check-equal? ((opt-update (ldiag 1) symbol->string) '(a b c)) '("b" "b" "b"))
-
-  ;; --- row lifts over parallel lists: the policy opt decides get AND set ---
-  ;; focal policy: whole row in view, put writes the first list's slot, returns it alone
-  (check-equal? (vlist (opt-lref 1 focal) '(a b c) '(x y z) '(1 2 3)) '(b y 2))
-  (check-equal? (((opt-set (opt-lref 1 focal)) 'B) '(a b c) '(x y z)) '(a B c))
-  (check-equal? ((opt-update (opt-lref 1 focal) (lambda (b y) y))           ; read ctx, write focal
-                 '(a b c) '(x y z))
-                '(a y c))
-  ;; varg policy: symmetric world -- the put returns EVERY list rebuilt (P's arity, listified)
-  (check-equal? (call-with-values
-                  (lambda () (((opt-set (opt-lref 1 (varg 0))) 'B) '(a b c) '(x y z))) list)
-                '((a B c) (x y z)))
-  ;; vdiag policy: broadcast ACROSS the lists at index n (both lists' slot 1 become 'Q)
-  (check-equal? (call-with-values
-                  (lambda () (((opt-set (opt-lref 1 (vdiag 0))) 'Q) '(a b c) '(x y z))) list)
-                '((a Q c) (x Q z)))
-  ;; opt-ldiag: the same lift, broadcasting ALONG each written list
-  (check-equal? (vlist (opt-ldiag 1 focal) '(a b c) '(1 2 3)) '(b 2))
-  (check-equal? (((opt-set (opt-ldiag 0 focal)) 'X) '(a b c) '(1 2 3)) '(X X X))
-  ;; single list, identity-ish policy: the old shapes recovered as instances
-  (check-equal? (vlist (opt-lref 1 focal) '(a b c)) '(b))
-  (check-equal? (((opt-set (opt-ldiag 1 focal)) 'X) '(a b c)) '(X X X))
-  ;; list-of over parallel lists: each further list arrives mapped through the element opt
-  (define el (opt-from-peek (lambda (p) (values (lambda (x) (cons x (cdr p))) (car p)))))
-  (check-equal? (vlist (list-of el) (list '(1 . g) '(2 . g)) (list '(3 . h) '(4 . h)))
-                '((1 2) (3 4)))
-  (check-equal? (((opt-set (list-of el)) '(10 20)) (list '(1 . g) '(2 . g)) (list '(3 . h) '(4 . h)))
-                (list '(10 . g) '(20 . g)))
-
-  ;; --- opt-list: the elementwise lift -- P at every index, everything listified ---
-  ;; a one-component P recovers list-of's shape
-  (check-equal? (vlist (opt-list el) (list '(1 . g) '(2 . g))) '((1 2)))
-  (check-equal? (((opt-set (opt-list el)) '(10 20)) (list '(1 . g) '(2 . g)))
-                (list '(10 . g) '(20 . g)))
-  ;; a k-component P consumes k parallel lists; view/news/output all listified
-  (check-equal? (vlist (opt-list focal) '(a b) '(1 2)) '((a b) (1 2)))
-  (check-equal? (((opt-set (opt-list focal)) '(X Y)) '(a b) '(1 2)) '(X Y))
-  (check-equal? ((opt-update (opt-list focal) (lambda (vs cs) cs)) '(a b) '(1 2))
-                '(1 2))                                           ; per-element: write ctx into focal
-  ;; bare run = recompose, elementwise (focal's put returns its first list rebuilt)
-  (check-equal? ((opt-list focal) '(a b) '(1 2)) '(a b))
-
-  ;; --- the viewer channel: world renders, joined as a monoid ---
-  (define (vlist* o . ws) (call-with-values (lambda () (apply (opt-get* o) ws)) list))
-  (define shown (attach-viewer fst-opt length))                 ; render the WORLD (the whole list)
-  (check-equal? (vlist* shown '(1 2)) '(1 2))                   ; widened read: focus, then render
-  (check-equal? (vlist shown '(1 2)) '(1))                      ; the narrow get stays narrow
-  (check-equal? (((opt-set shown) 9) '(1 2)) '(9 2))            ; put = fst-opt's own
-  (check-equal? (shown '(1 2)) '(1 2))                          ; bare run: channel never runs
-  (check-equal? ((opt-update shown (lambda (v n) (* v n))) '(3 2))
-                '(6 2))                                          ; a transform sees the render
-  ;; the monoid: unit, append, associativity (observationally)
-  (define (vj v . ws) (call-with-values (lambda () (apply v ws)) list))
-  (define v1 (lambda (w) (values 'a 'b)))                        ; multi-value renders splice
-  (define v2 (lambda (w) 'c))
-  (check-equal? (vj (view-join v1 no-view) 9) (vj v1 9))         ; right unit
-  (check-equal? (vj (view-join no-view v1) 9) (vj v1 9))         ; left unit
-  (check-equal? (vj (view-join (view-join v1 v2) no-view) 9)
-                (vj (view-join v1 (view-join v2 no-view)) 9))    ; associative
-  (check-equal? (vj (view-join v1 v2) 9) '(a b c))
-  ;; attachment joins into ONE view; further attachments keep joining
-  (check-equal? (vlist* (attach-viewer shown (lambda (l) (car l))) '(1 2)) '(1 2 1))
-  ;; composition joins channels: the inner's render (world = the outer view) rides
-  ;; nearest the foci, the outer's own after
-  (define shown2 (compose-opt (attach-viewer fst-opt length)
-                              (attach-viewer (compose-opt) number->string)))
-  (check-equal? (vlist* shown2 '(7 8 9)) '(7 "7" 3))
-  (check-equal? ((opt-update shown2 (lambda (v s n) (+ v (string-length s) n))) '(7 8 9))
-                '(11 8 9))                                       ; transform sees foci + both renders
-
-  ;; vdiag: ldiag on the value stream -- view value i, the put broadcasts to every position
-  (check-equal? ((opt-get (vdiag 0)) 'a 'b 'c) 'a)
-  (check-equal? ((opt-get (vdiag 1)) 'a 'b 'c) 'b)
-  (check-equal? (call-with-values (lambda () (((opt-set (vdiag 0)) 'X) 'a 'b 'c)) list) '(X X X))
-  (check-equal? (call-with-values (lambda () ((opt-update (vdiag 1) symbol->string) 'a 'b 'c)) list)
-                '("b" "b" "b"))
 
   ;; --- WIP: lockstep -- equivalent twins agree, a bad twin and a shape split are caught ---
   (define sos (lockstep (lambda (xs) (apply + (map (lambda (x) (* x x)) xs)))

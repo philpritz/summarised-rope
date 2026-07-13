@@ -52,8 +52,8 @@
 (define ((at-frac p) L R)                  ; boundary at p of the whole (L+R = total chars)
   (define k (exact-round (* p (+ L R))))
   (cond [(< L k) 1] [(> L k) -1] [else 0]))
-(define (gap-at p)   (vector (at-frac p) (at-frac p)))
-(define (seg-at a b) (vector (at-frac a) (at-frac b)))
+(define (gap-at p)   (list (at-frac p) (at-frac p)))
+(define (seg-at a b) (list (at-frac a) (at-frac b)))
 (define (idx n p) (exact-round (* (max 0.0 (min 1.0 p)) n)))
 
 ;; ============================================================================
@@ -84,28 +84,28 @@
   (define (do-op z model y kind p q)
     (define n (string-length model))
     (case kind
-      [(move-gap) (values (((opt-set zipper-guide) (gap-at p)) z) model y
+      [(move-gap) (values (((stage-set zipper-guides) (gap-at p)) z) model y
                           (format "move-gap @~a" (~r p #:precision '(= 2))))]
       [(move-seg) (define a (min p q)) (define b (max p q))
-                  (values (((opt-set zipper-guide) (seg-at a b)) z) model y
+                  (values (((stage-set zipper-guides) (seg-at a b)) z) model y
                           (format "move-seg [~a ~a]" (~r a #:precision '(= 2)) (~r b #:precision '(= 2))))]
       [else (define y* (stepY y))
             (define dn (- (exact-round (sq y*)) n))
             (cond
               [(>= dn 0) (define i (idx n p)) (define s (make-string dn #\x))
-                         (values (((opt-set zipper-focus) s) (((opt-set zipper-guide) (gap-at p)) z))
+                         (values (((stage-set zipper-focus/g) s) (((stage-set zipper-guides) (gap-at p)) z))
                                  (string-append (substring model 0 i) s (substring model i)) y*
                                  (format "insert ~a @~a" dn (~r p #:precision '(= 2))))]
               [else (define d (min (- dn) (max 0 (sub1 n))))
                     (define i (idx (- n d) p)) (define j (+ i d))
-                    (values (((opt-set zipper-focus) "") (((opt-set zipper-guide) (seg-at (/ i n) (/ j n))) z))
+                    (values (((stage-set zipper-focus/g) "") (((stage-set zipper-guides) (seg-at (/ i n) (/ j n))) z))
                             (string-append (substring model 0 i) (substring model j)) y*
                             (format "delete ~a @~a" d (~r p #:precision '(= 2))))])]))
 
   ;; ---- run a mixed sequence, checking all three oracles each step ----
   (define STEPS 24)
   (define start-doc (make-string (exact-round N*) #\a))
-  (define z0 (start cc ((make-rope cc) start-doc) (gap-at 0.0)))
+  (define z0 (apply start cc ((make-rope cc) start-doc) (gap-at 0.0)))
   (define kinds (vector 'move-gap 'move-seg 'edit 'edit 'edit))
 
   (printf "OU edit sequence: band [~a,~a] centre ~a   (~a steps, seed 7)\n"
@@ -120,7 +120,7 @@
               ([i STEPS])
       (define kind (vector-ref kinds (random (vector-length kinds))))
       (define-values (z* model* y* label) (do-op z model y kind (random) (random)))
-      (define root ((opt-get zipper-focus) (to-root z*)))
+      (define root ((stage-get zipper-focus/g) (to-root z*)))
       (define len  (string-length model*))
       (define lvs  (rope-leaves* root))
       (define ht   (rope-height* root))
@@ -146,17 +146,17 @@
   ;; tallness is read at batch boundaries (untimed). ----
   (define (timed-op z n y kind p q)
     (case kind
-      [(move-gap) (values (((opt-set zipper-guide) (gap-at p)) z) n y)]
+      [(move-gap) (values (((stage-set zipper-guides) (gap-at p)) z) n y)]
       [(move-seg) (let ([a (min p q)] [b (max p q)])
-                    (values (((opt-set zipper-guide) (seg-at a b)) z) n y))]
+                    (values (((stage-set zipper-guides) (seg-at a b)) z) n y))]
       [else (define y* (stepY y))
             (define dn (- (exact-round (sq y*)) n))
             (cond
-              [(>= dn 0) (values (((opt-set zipper-focus) (make-string dn #\x)) (((opt-set zipper-guide) (gap-at p)) z))
+              [(>= dn 0) (values (((stage-set zipper-focus/g) (make-string dn #\x)) (((stage-set zipper-guides) (gap-at p)) z))
                                  (+ n dn) y*)]
               [else (define d (min (- dn) (max 0 (sub1 n))))
                     (define i (idx (- n d) p)) (define j (+ i d))
-                    (values (((opt-set zipper-focus) "") (((opt-set zipper-guide) (seg-at (/ i n) (/ j n))) z))
+                    (values (((stage-set zipper-focus/g) "") (((stage-set zipper-guides) (seg-at (/ i n) (/ j n))) z))
                             (- n d) y*)])]))
 
   (define BATCH 500) (define BATCHES 20)
@@ -167,7 +167,7 @@
           (~a "us/op" #:min-width 8) (~a "tall" #:min-width 6))
 
   (define batch-usop
-    (let ([z1 (start cc ((make-rope cc) start-doc) (gap-at 0.0))])
+    (let ([z1 (apply start cc ((make-rope cc) start-doc) (gap-at 0.0))])
       (for/fold ([z z1] [n (string-length start-doc)] [y muY] [ts '()] #:result (reverse ts))
                 ([b (in-range BATCHES)])
         (define t0 (current-inexact-milliseconds))
@@ -175,7 +175,7 @@
           (for/fold ([z z] [n n] [y y]) ([_ (in-range BATCH)])
             (timed-op z n y (vector-ref kinds (random (vector-length kinds))) (random) (random))))
         (define usop (* 1000.0 (/ (- (current-inexact-milliseconds) t0) BATCH)))
-        (define tall (tallness ((opt-get zipper-focus) (to-root z*))))           ; untimed
+        (define tall (tallness ((stage-get zipper-focus/g) (to-root z*))))           ; untimed
         (printf "~a ~a ~a ~a ~a\n"
                 (~a b #:min-width 6) (~a (* (add1 b) BATCH) #:min-width 7) (~a n* #:min-width 6)
                 (~a (~r usop #:precision '(= 2)) #:min-width 8)
@@ -200,25 +200,25 @@
   ;; one op: 30% move, else a small insert/delete biased to revert toward target N*.
   (define (op z n N*)
     (cond
-      [(< (random) 0.30) (values (((opt-set zipper-guide) (gap-at (random))) z) n)]      ; move
+      [(< (random) 0.30) (values (((stage-set zipper-guides) (gap-at (random))) z) n)]      ; move
       [else
        (define s (add1 (random 40)))                                          ; small, absolute
        (define grow? (if (< n N*) (< (random) 0.7) (< (random) 0.3)))         ; revert toward N*
        (if grow?
-           (values (((opt-set zipper-focus) (make-string s #\x)) (((opt-set zipper-guide) (gap-at (random))) z)) (+ n s))
+           (values (((stage-set zipper-focus/g) (make-string s #\x)) (((stage-set zipper-guides) (gap-at (random))) z)) (+ n s))
            (let* ([d (min s (max 0 (sub1 n)))] [p (random)]
                   [i (idx (- n d) p)] [j (+ i d)])
-             (values (((opt-set zipper-focus) "") (((opt-set zipper-guide) (seg-at (/ i n) (/ j n))) z)) (- n d))))]))
+             (values (((stage-set zipper-focus/g) "") (((stage-set zipper-guides) (seg-at (/ i n) (/ j n))) z)) (- n d))))]))
 
   (define (run N* K)                                  ; build N*-char rope, time K ops
-    (define z0 (start cc ((make-rope cc) (make-string N* #\a)) (gap-at 0.0)))
+    (define z0 (apply start cc ((make-rope cc) (make-string N* #\a)) (gap-at 0.0)))
     (define-values (zw nw)                            ; warmup (untimed)
       (for/fold ([z z0] [n N*]) ([_ (in-range (quotient K 4))]) (op z n N*)))
     (define t0 (current-inexact-milliseconds))
     (define-values (zf nf)
       (for/fold ([z zw] [n nw]) ([_ (in-range K)]) (op z n N*)))
     (define usop (* 1000.0 (/ (- (current-inexact-milliseconds) t0) K)))
-    (define root ((opt-get zipper-focus) (to-root zf)))
+    (define root ((stage-get zipper-focus/g) (to-root zf)))
     (values usop (rope-leaves* root) (rope-height* root) (tallness root)))
 
   (run 1000 200)                                      ; global JIT warmup, discarded
@@ -268,17 +268,17 @@
   (define (do-insert z model k)                        ; insert a new form before form k
     (define text (render model)) (define a (list-ref (offsets model) k))
     (define nf (a-form))
-    (values (((opt-set zipper-focus) nf) (((opt-set zipper-guide) (sexp-guides (front-at text a))) z))
+    (values (((stage-set zipper-focus/g) nf) (((stage-set zipper-guides) (sexp-guides (front-at text a))) z))
             (append (take model k) (list nf) (drop model k))))
   (define (do-delete z model k)                        ; delete form k
     (define text (render model)) (define os (offsets model))
     (define a (list-ref os k)) (define b (list-ref os (add1 k)))
-    (values (((opt-set zipper-focus) "") (((opt-set zipper-guide) (sexp-guides (front-at text a) (back-at text b))) z))
+    (values (((stage-set zipper-focus/g) "") (((stage-set zipper-guides) (sexp-guides (front-at text a) (back-at text b))) z))
             (append (take model k) (drop model (add1 k)))))
   (define (do-replace z model k)                       ; replace form k with a fresh one
     (define text (render model)) (define os (offsets model))
     (define a (list-ref os k)) (define b (list-ref os (add1 k))) (define nf (a-form))
-    (values (((opt-set zipper-focus) nf) (((opt-set zipper-guide) (sexp-guides (front-at text a) (back-at text b))) z))
+    (values (((stage-set zipper-focus/g) nf) (((stage-set zipper-guides) (sexp-guides (front-at text a) (back-at text b))) z))
             (append (take model k) (list nf) (drop model (add1 k)))))
 
   ;; readable?: parse the whole doc, return how many top-level forms it yields (or #f)
@@ -291,7 +291,7 @@
   (define STEPS 20)
   (define model0 (build-list 6 (lambda (_) (a-form))))
   (define text0  (render model0))
-  (define z0 (start sexp-smr ((make-rope sexp-smr) text0) (sexp-guides (front-at text0 0))))
+  (define z0 (apply start sexp-smr ((make-rope sexp-smr) text0) (sexp-guides (front-at text0 0))))
 
   (printf "random whole-form sexp editing (~a steps, start ~a forms)\n" STEPS (length model0))
   (printf "~a ~a ~a ~a ~a\n" (~a "#" #:min-width 3) (~a "op" #:min-width 12)
@@ -306,7 +306,7 @@
       (define-values (z* model*)
         (case op [(insert) (do-insert z model k)] [(delete) (do-delete z model k)]
                  [else (do-replace z model k)]))
-      (define doc (~a ((opt-get zipper-focus) (to-root z*))))
+      (define doc (~a ((stage-get zipper-focus/g) (to-root z*))))
       (define okc (equal? doc (render model*)))                       ; content == model
       (define okr (equal? (read-count doc) (length model*)))          ; reparses to N forms
       (printf "~a ~a ~a ~a ~a\n"
@@ -341,13 +341,13 @@
 
   (define usops
     (let* ([t0 (render model0)]
-           [zS (start sexp-smr ((make-rope sexp-smr) t0) (sexp-guides (front-at t0 0)))])
+           [zS (apply start sexp-smr ((make-rope sexp-smr) t0) (sexp-guides (front-at t0 0)))])
       (for/fold ([z zS] [model model0] [ts '()] #:result (reverse ts)) ([b (in-range BATCHES)])
         (define tt0 (current-inexact-milliseconds))
         (define-values (z* model*)
           (for/fold ([z z] [model model]) ([_ (in-range BATCH)]) (timed-step z model)))
         (define usop (* 1000.0 (/ (- (current-inexact-milliseconds) tt0) BATCH)))
-        (define root ((opt-get zipper-focus) (to-root z*)))
+        (define root ((stage-get zipper-focus/g) (to-root z*)))
         (printf "~a ~a ~a ~a ~a\n"
                 (~a b #:min-width 6) (~a (length model*) #:min-width 6)
                 (~a (rope-leaves* root) #:min-width 7)

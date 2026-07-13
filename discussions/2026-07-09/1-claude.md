@@ -45,3 +45,28 @@ is saved in `toolbox/old/`; 2569 tests green.
   (`no-view`/`view-join`), never in the put path. Context that downstream optics
   must consume stays as extra *foci* instead (lisp-edit's widened optics) — the
   channel deliberately never flows into an inner world.
+
+**The migration onto the church optic — 2026-07-12:**
+
+- The staged / church-store optic named above as the opt's successor
+  (`toolbox/stage.rkt`) got its missing combinators, and every consumer moved onto
+  it. 2938 tests green.
+- The optic, briefly: a stage is `((f . idxs) . ws) → (values g* put)`; the store
+  `g*` feeds a consumer its **renders** (a config bus) then its **foci**. Context the
+  opt kept as a separate `view` channel — or smuggled as extra foci (lisp-edit's
+  widened optics) — now rides the render bus, read by the next stage as its config.
+- New staged surface: wearings `iso->stage` / `spl->stage`; list lifts `ldiag/g`,
+  `stage-lref` / `stage-ldiag` / `stage-list` over a row policy with `focal/g`;
+  `render-with`; and `as-stage` (re-collects the spread bus so a flat policy enters a
+  `compose-stage` chain).
+- Consumers migrated (off opt, preferring `reading` / `writing`): `lines-edit`,
+  `sexp-split`, `lines-zip`; the lisp tower `lisp-edit` → `lisp-view`; `sexp-edit` and
+  `char-edit` (the latter also de-staled). Added `zipper-guides` — the staged
+  both-edges guide optic — to `zipper-core`.
+- Retired the store-shaped opt entirely: removed `zipper-core`'s opt optics
+  (`zipper-guide`/`-head`/`head-focus`/`-focus`) and `algebra`'s whole opt family
+  (`opt` / `opt-get` / … / `list-of` / `opt-list` / `focal` / `varg` / `vdiag`), which
+  survive only as the snapshot `toolbox/old/algebra-store-shaped.rkt`. `zipper-core`'s
+  oracle tests now cross-check the staged optics against each other; `zipper-show` and
+  the `bench/` benchmarks moved onto the staged optics too (the benchmarks were also
+  de-staled — vector guides and 3-arg `start` predated the guide-list rep).
